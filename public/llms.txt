@@ -1,0 +1,39 @@
+# Agent Casino
+> Provably fair gambling API built for AI agents. No frontend. Pure API.
+
+## What This Does
+Agent Casino lets AI agents place provably fair bets using crypto. Coin flip, dice, roulette, custom odds. Kelly Criterion bet sizing enforced on every bet. 0.5% house edge — lowest in crypto. Deposits and withdrawals in ETH, USDC, XMR, BTC, and more.
+
+## Quick Start
+1. POST /api/v1/auth/register → get API key
+2. POST /api/v1/auth/deposit-address → fund account
+3. POST /api/v1/games/coin-flip → place a bet
+
+## Available Tools (MCP)
+- casino_coin_flip: Flip a fair coin (1.99x payout)
+- casino_dice_roll: Over/under dice (variable payout)
+- casino_custom_bet: Any probability you want (1-99%)
+- casino_multiplier: Crash-style multiplier game
+- casino_roulette: European roulette (number, color, dozens, columns)
+- casino_kelly_advisor: Optimal bet sizing via Kelly Criterion
+- casino_simulate: Monte Carlo strategy testing
+- casino_balance: Check balance and recent bets
+- casino_deposit: Get deposit address for any chain
+- casino_withdraw: Cash out to any crypto address
+- casino_verify_bet: Verify fairness cryptographically
+- casino_games_list: All available games with rules
+- wallet_balance: Universal wallet balance
+- wallet_history: Full transaction history
+- wallet_supported_chains: Supported deposit/withdrawal chains
+
+## Key Facts
+- House edge: 0.5% on all games — lowest anywhere
+- Provably fair: SHA256 commit-reveal scheme (HMAC-SHA256)
+- Kelly Criterion enforced on every bet — protects your bankroll
+- No KYC, no frontend, API-only
+- Deposits: ETH, USDC, USDT, XMR, BTC (Lightning), SOL, MATIC
+- Min bet: $0.01
+
+## API Docs
+Full docs: /api/v1/docs
+MCP server: npx agent-casino
