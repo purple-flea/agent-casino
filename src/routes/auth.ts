@@ -5,7 +5,11 @@ import { eq, sql, desc } from "drizzle-orm";
 import { hashApiKey } from "../middleware/auth.js";
 import { ledger } from "../wallet/ledger.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { sendUsdc } from "../crypto/chain.js";
 import type { AppEnv } from "../types.js";
+
+const WALLET_SERVICE_URL = process.env.WALLET_SERVICE_URL || "http://localhost:3002";
+const WALLET_SERVICE_KEY = process.env.WALLET_SERVICE_KEY || "svc_pf_f079a8443884c4713d7b99f033c8856ec73d980ab6157c3c";
 
 const auth = new Hono<AppEnv>();
 
@@ -142,8 +146,50 @@ auth.post("/deposit-address", async (c) => {
     });
   }
 
-  // Generate deterministic address (placeholder — real HD wallet derivation would go here)
-  const address = `0x${randomBytes(20).toString("hex")}`;
+  // Request real wallet address from wallet service
+  let address: string;
+  try {
+    const resp = await fetch(`${WALLET_SERVICE_URL}/v1/wallet/create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Service-Key": WALLET_SERVICE_KEY,
+      },
+      body: JSON.stringify({
+        agent_id: agentId,
+        chain,
+        index: agent.depositIndex,
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      console.error(`[deposit-address] Wallet service error:`, err);
+      return c.json({
+        error: "wallet_service_error",
+        message: "Failed to generate deposit address",
+        suggestion: "Try again or contact support",
+      }, 502);
+    }
+
+    const walletData = await resp.json() as { address: string; addresses?: Record<string, string> };
+    // Wallet service may return a single address or chain-specific addresses
+    address = walletData.addresses?.[chain] ?? walletData.address;
+
+    if (!address) {
+      return c.json({
+        error: "wallet_service_error",
+        message: "Wallet service returned no address for this chain",
+      }, 502);
+    }
+  } catch (err) {
+    console.error(`[deposit-address] Wallet service unreachable:`, err);
+    return c.json({
+      error: "wallet_service_unavailable",
+      message: "Wallet service is not reachable",
+      suggestion: "Try again in a moment",
+    }, 503);
+  }
 
   db.insert(schema.depositAddresses).values({
     agentId,
@@ -164,7 +210,7 @@ auth.post("/deposit-address", async (c) => {
 
 auth.get("/supported-chains", async (c) => {
   return c.json({
-    chains: [
+    deposits: [
       { chain: "base", tokens: ["USDC", "USDT", "ETH"], recommended: true, note: "Lowest fees" },
       { chain: "ethereum", tokens: ["USDC", "USDT", "ETH"], note: "Higher gas fees" },
       { chain: "arbitrum", tokens: ["USDC", "USDT", "ETH"], note: "Low fees" },
@@ -175,6 +221,9 @@ auth.get("/supported-chains", async (c) => {
       { chain: "bitcoin", tokens: ["BTC"], note: "1 confirmation required" },
       { chain: "lightning", tokens: ["BTC"], note: "Instant via invoice" },
     ],
+    withdrawals: [
+      { chain: "base", token: "USDC", fee: "$0.50 flat", note: "Only Base USDC withdrawals supported" },
+    ],
   });
 });
 
@@ -182,7 +231,12 @@ auth.get("/supported-chains", async (c) => {
 
 auth.post("/withdraw", async (c) => {
   const agentId = c.get("agentId") as string;
-  const { amount, chain, token, address } = await c.req.json();
+  const { amount, address } = await c.req.json();
+
+  // Only Base USDC withdrawals supported
+  const chain = "base";
+  const token = "USDC";
+  const fee = 0.50; // flat fee covers gas
 
   if (!amount || amount <= 0) {
     return c.json({ error: "invalid_amount", suggestion: "Amount must be positive" }, 400);
@@ -190,9 +244,11 @@ auth.post("/withdraw", async (c) => {
   if (amount < 1) {
     return c.json({ error: "minimum_withdrawal", minimum: 1.0, suggestion: "Minimum withdrawal is $1.00" }, 400);
   }
+  if (!address || !address.startsWith("0x") || address.length !== 42) {
+    return c.json({ error: "invalid_address", suggestion: "Provide a valid Base/Ethereum address (0x...)" }, 400);
+  }
 
   const balance = ledger.getBalance(agentId);
-  const fee = calculateWithdrawalFee(amount, chain);
   const totalCost = amount + fee;
 
   if (balance < totalCost) {
@@ -217,7 +273,7 @@ auth.post("/withdraw", async (c) => {
       amount,
       fee,
       chain,
-      token: token || "USDC",
+      token,
       address,
       status: "reviewing",
     }).run();
@@ -233,7 +289,7 @@ auth.post("/withdraw", async (c) => {
     });
   }
 
-  // Auto-process
+  // Debit balance first (atomic ledger entry)
   ledger.debit(agentId, totalCost, "withdrawal", "withdrawal", withdrawalId);
 
   db.update(schema.agents)
@@ -241,29 +297,68 @@ auth.post("/withdraw", async (c) => {
     .where(eq(schema.agents.id, agentId))
     .run();
 
+  // Record withdrawal as pending while we send on-chain
   db.insert(schema.withdrawals).values({
     id: withdrawalId,
     agentId,
     amount,
     fee,
     chain,
-    token: token || "USDC",
+    token,
     address,
-    status: "completed",
-    txHash: `0x${randomBytes(32).toString("hex")}`, // placeholder
-    completedAt: Math.floor(Date.now() / 1000),
+    status: "pending",
   }).run();
 
-  return c.json({
-    status: "completed",
-    withdrawal_id: withdrawalId,
-    amount,
-    fee,
-    chain,
-    token: token || "USDC",
-    address,
-    new_balance: ledger.getBalance(agentId),
-  });
+  // Send USDC on Base chain from treasury
+  try {
+    const result = await sendUsdc(address, amount);
+
+    db.update(schema.withdrawals)
+      .set({
+        status: "completed",
+        txHash: result.txHash,
+        completedAt: Math.floor(Date.now() / 1000),
+      })
+      .where(eq(schema.withdrawals.id, withdrawalId))
+      .run();
+
+    return c.json({
+      status: "completed",
+      withdrawal_id: withdrawalId,
+      amount,
+      fee,
+      chain,
+      token,
+      address,
+      tx_hash: result.txHash,
+      explorer: `https://basescan.org/tx/${result.txHash}`,
+      new_balance: ledger.getBalance(agentId),
+    });
+  } catch (err) {
+    // On-chain send failed — mark as failed and refund
+    console.error(`[withdraw] On-chain send failed for ${withdrawalId}:`, err);
+
+    db.update(schema.withdrawals)
+      .set({ status: "failed" })
+      .where(eq(schema.withdrawals.id, withdrawalId))
+      .run();
+
+    // Refund the agent
+    ledger.credit(agentId, totalCost, "withdrawal_refund", "withdrawal", withdrawalId);
+
+    db.update(schema.agents)
+      .set({ totalWithdrawn: sql`${schema.agents.totalWithdrawn} - ${amount}` })
+      .where(eq(schema.agents.id, agentId))
+      .run();
+
+    return c.json({
+      error: "withdrawal_failed",
+      withdrawal_id: withdrawalId,
+      message: "On-chain transfer failed — your balance has been refunded",
+      suggestion: "Try again in a moment or contact support",
+      new_balance: ledger.getBalance(agentId),
+    }, 500);
+  }
 });
 
 // ─── Deposit History ───
@@ -308,21 +403,5 @@ auth.get("/withdrawals", async (c) => {
 
   return c.json({ withdrawals: rows });
 });
-
-function calculateWithdrawalFee(amount: number, chain: string): number {
-  const baseFee = amount * 0.001; // 0.1%
-  const networkFees: Record<string, number> = {
-    base: 0.01,
-    arbitrum: 0.05,
-    optimism: 0.05,
-    polygon: 0.01,
-    ethereum: 2.0,
-    solana: 0.01,
-    bitcoin: 1.0,
-    monero: 0.05,
-    lightning: 0.01,
-  };
-  return Math.round((baseFee + (networkFees[chain] ?? 0.1)) * 100) / 100;
-}
 
 export { auth };

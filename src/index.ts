@@ -12,6 +12,7 @@ import { betsRouter } from "./routes/bets.js";
 import { kelly } from "./routes/kelly.js";
 import { fairness } from "./routes/fairness.js";
 import { stats } from "./routes/stats.js";
+import { startDepositMonitor } from "./crypto/deposits.js";
 import type { AppEnv } from "./types.js";
 
 // Run migrations
@@ -54,7 +55,7 @@ api.get("/pricing", (c) => c.json({
   house_edge: "0.5% on all games",
   min_bet: 0.01,
   max_bet: "Kelly-limited based on your bankroll",
-  withdrawal_fee: "0.1% + network fee",
+  withdrawal_fee: "$0.50 flat (Base USDC only)",
   games: {
     coin_flip: { payout: "1.96x", probability: "50%" },
     dice: { payout: "Variable", probability: "Variable (1-99%)" },
@@ -75,7 +76,7 @@ api.get("/docs", (c) => c.json({
       "POST /auth/register": "Create agent account, returns API key",
       "GET /auth/balance": "Current balance + recent activity",
       "POST /auth/deposit-address": "Get deposit address for a chain",
-      "POST /auth/withdraw": "Withdraw to any chain/token",
+      "POST /auth/withdraw": "Withdraw USDC on Base ($0.50 fee, min $1.00)",
       "GET /auth/supported-chains": "List supported chains",
       "GET /auth/deposits": "Deposit history",
       "GET /auth/ledger": "Full transaction history",
@@ -137,6 +138,9 @@ serve({ fetch: app.fetch, port }, () => {
   console.log(`Agent Casino running on http://localhost:${port}`);
   console.log(`API docs: http://localhost:${port}/api/v1/docs`);
   console.log(`Health: http://localhost:${port}/health`);
+
+  // Start background deposit monitor (polls Base USDC every 60s)
+  startDepositMonitor();
 });
 
 export { app };
