@@ -1,14 +1,48 @@
 {
-  "name": "agent-casino",
+  "name": "@purpleflea/casino-mcp",
   "version": "1.0.0",
+  "description": "MCP server for AI agent casino — provably fair gambling with 0.5% house edge. Coin flip, dice, roulette, crash, custom odds. Kelly Criterion bankroll protection. By Purple Flea.",
   "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "casino-mcp": "./dist/mcp/server.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "ai-agent",
+    "casino",
+    "gambling",
+    "provably-fair",
+    "crypto",
+    "claude",
+    "openai",
+    "purple-flea",
+    "kelly-criterion",
+    "dice",
+    "roulette",
+    "coin-flip"
+  ],
+  "author": "Purple Flea",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/purple-flea/agent-casino.git"
+  },
+  "homepage": "https://github.com/purple-flea/agent-casino",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "mcp": "tsx src/mcp/server.ts"
+    "mcp": "tsx src/mcp/server.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
@@ -16,7 +50,8 @@
     "better-sqlite3": "^11.0.0",
     "drizzle-orm": "^0.39.0",
     "hono": "^4.0.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
