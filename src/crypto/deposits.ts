@@ -5,7 +5,8 @@ import { ledger } from "../wallet/ledger.js";
 import { getUsdcBalance, TREASURY_ADDRESS } from "./chain.js";
 
 const WALLET_SERVICE_URL = process.env.WALLET_SERVICE_URL || "http://localhost:3002";
-const WALLET_SERVICE_KEY = process.env.WALLET_SERVICE_KEY || "svc_pf_f079a8443884c4713d7b99f033c8856ec73d980ab6157c3c";
+const WALLET_SERVICE_KEY = process.env.WALLET_SERVICE_KEY;
+if (!WALLET_SERVICE_KEY) console.warn("[WARN] WALLET_SERVICE_KEY not set — deposit sweeps will fail");
 const POLL_INTERVAL_MS = 60_000; // 60 seconds
 const MIN_DEPOSIT_USD = 0.50;
 
@@ -35,6 +36,8 @@ async function pollDeposits(): Promise<void> {
         // Check if we already recorded this (avoid double-crediting)
         // We check by address — if there's a pending or credited deposit for this address
         // with the same approximate amount in the last 5 minutes, skip it
+        // Check for duplicate: same address, same amount, within last 5 minutes
+        const fiveMinAgo = Math.floor(Date.now() / 1000) - 300;
         const recentDeposit = db
           .select()
           .from(schema.deposits)
@@ -49,7 +52,7 @@ async function pollDeposits(): Promise<void> {
           .find(
             (d) =>
               Math.abs(d.amountUsd - balance) < 0.01 &&
-              d.createdAt > Math.floor(Date.now() / 1000) - 120
+              d.createdAt > fiveMinAgo
           );
 
         if (recentDeposit) continue;

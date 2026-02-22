@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, desc, sql, count } from "drizzle-orm";
+import { eq, desc, sql, count, and, gte } from "drizzle-orm";
 import type { AppEnv } from "../types.js";
 
 const stats = new Hono<AppEnv>();
@@ -61,9 +61,11 @@ stats.get("/session", async (c) => {
   const sessionBets = db
     .select()
     .from(schema.bets)
-    .where(eq(schema.bets.agentId, agentId))
-    .all()
-    .filter((b) => b.createdAt >= oneDayAgo);
+    .where(and(
+      eq(schema.bets.agentId, agentId),
+      gte(schema.bets.createdAt, oneDayAgo),
+    ))
+    .all();
 
   const wagered = sessionBets.reduce((s, b) => s + b.amount, 0);
   const won = sessionBets.reduce((s, b) => s + b.amountWon, 0);

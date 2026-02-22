@@ -140,7 +140,11 @@ export interface SimulationResult {
 }
 
 export function simulate(input: SimulationInput): SimulationResult {
-  const { bankroll, betAmount, winProbability, payoutMultiplier, numBets, simulations } = input;
+  const MAX_SIMULATIONS = 10_000;
+  const MAX_BETS = 5_000;
+  const { bankroll, betAmount, winProbability, payoutMultiplier } = input;
+  const numBets = Math.min(input.numBets, MAX_BETS);
+  const simulations = Math.min(input.simulations, MAX_SIMULATIONS);
 
   const finals: number[] = [];
   let ruins = 0;

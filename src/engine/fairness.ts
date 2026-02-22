@@ -1,6 +1,6 @@
 import { createHmac, createHash, randomBytes } from "crypto";
 import { db, schema } from "../db/index.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 
 export interface SeedPair {
   seed: string;
@@ -86,25 +86,22 @@ export function getOrCreateActiveSeed(agentId: string): {
 }
 
 export function incrementNonce(seedId: number): number {
-  const row = db
-    .select({ nonce: schema.serverSeeds.currentNonce })
-    .from(schema.serverSeeds)
+  // Atomic increment: UPDATE + RETURNING ensures no two concurrent bets get the same nonce
+  const row = db.update(schema.serverSeeds)
+    .set({ currentNonce: sql`${schema.serverSeeds.currentNonce} + 1` })
     .where(eq(schema.serverSeeds.id, seedId))
+    .returning({ previousNonce: sql<number>`${schema.serverSeeds.currentNonce} - 1` })
     .get();
 
-  const newNonce = (row?.nonce ?? 0) + 1;
-
-  db.update(schema.serverSeeds)
-    .set({ currentNonce: newNonce })
-    .where(eq(schema.serverSeeds.id, seedId))
-    .run();
+  const usedNonce = row?.previousNonce ?? 0;
+  const newNonce = usedNonce + 1;
 
   // Rotate seed every 1000 bets
   if (newNonce >= 1000) {
     rotateSeed(seedId);
   }
 
-  return row?.nonce ?? 0; // Return the nonce BEFORE increment (used for this bet)
+  return usedNonce; // Return the nonce BEFORE increment (used for this bet)
 }
 
 export function rotateSeed(seedId: number): void {

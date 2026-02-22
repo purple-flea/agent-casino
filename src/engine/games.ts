@@ -58,8 +58,8 @@ function validateAndReserve(
   winProbability: number,
   payoutMultiplier: number
 ): { ok: true; betId: string; agent: typeof schema.agents.$inferSelect } | { ok: false; error: GameError } {
-  if (amount <= 0) {
-    return { ok: false, error: { error: "invalid_amount", message: "Bet amount must be positive" } };
+  if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) {
+    return { ok: false, error: { error: "invalid_amount", message: "Bet amount must be a positive finite number" } };
   }
   if (amount < 0.01) {
     return { ok: false, error: { error: "minimum_bet", message: "Minimum bet is $0.01" } };
@@ -95,7 +95,7 @@ function validateAndReserve(
     };
   }
 
-  const betId = `bet_${randomUUID().slice(0, 8)}`;
+  const betId = `bet_${randomUUID()}`;
   const reserved = ledger.reserve(agentId, amount, betId);
   if (!reserved) {
     return {

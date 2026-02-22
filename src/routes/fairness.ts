@@ -31,10 +31,11 @@ fairness.post("/verify", async (c) => {
 
   // If bet_id provided, look up from DB
   if (bet_id) {
+    const agentId = c.get("agentId") as string;
     const bet = db
       .select()
       .from(schema.bets)
-      .where(eq(schema.bets.id, bet_id))
+      .where(and(eq(schema.bets.id, bet_id), eq(schema.bets.agentId, agentId)))
       .get();
 
     if (!bet) {

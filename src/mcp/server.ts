@@ -94,7 +94,6 @@ server.tool("casino_balance", "Check your current casino balance, deposit addres
       type: "text",
       text: JSON.stringify({
         agent_id: agentId,
-        api_key: sessionApiKey,
         balance_usd: agent.balanceUsd,
         risk_factor: agent.riskFactor,
         lifetime: {

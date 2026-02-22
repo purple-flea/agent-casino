@@ -9,7 +9,8 @@ import { sendUsdc } from "../crypto/chain.js";
 import type { AppEnv } from "../types.js";
 
 const WALLET_SERVICE_URL = process.env.WALLET_SERVICE_URL || "http://localhost:3002";
-const WALLET_SERVICE_KEY = process.env.WALLET_SERVICE_KEY || "svc_pf_f079a8443884c4713d7b99f033c8856ec73d980ab6157c3c";
+const WALLET_SERVICE_KEY = process.env.WALLET_SERVICE_KEY;
+if (!WALLET_SERVICE_KEY) console.warn("[WARN] WALLET_SERVICE_KEY not set — deposit address generation will fail");
 
 const auth = new Hono<AppEnv>();
 
@@ -253,14 +254,18 @@ auth.post("/withdraw", async (c) => {
   if (amount < 1) {
     return c.json({ error: "minimum_withdrawal", minimum: 1.0, suggestion: "Minimum withdrawal is $1.00" }, 400);
   }
-  if (!address || !address.startsWith("0x") || address.length !== 42) {
-    return c.json({ error: "invalid_address", suggestion: "Provide a valid Base/Ethereum address (0x...)" }, 400);
+  if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    return c.json({ error: "invalid_address", suggestion: "Provide a valid Base/Ethereum address (0x followed by 40 hex characters)" }, 400);
   }
 
-  const balance = ledger.getBalance(agentId);
   const totalCost = amount + fee;
+  const withdrawalId = randomUUID();
 
-  if (balance < totalCost) {
+  // Reserve funds atomically to prevent race conditions (double-withdrawal)
+  try {
+    ledger.reserve(agentId, totalCost, withdrawalId);
+  } catch {
+    const balance = ledger.getBalance(agentId);
     return c.json({
       error: "insufficient_balance",
       requested: amount,
@@ -271,11 +276,8 @@ auth.post("/withdraw", async (c) => {
     }, 400);
   }
 
-  const withdrawalId = randomUUID();
-
   if (amount > 1000) {
-    // Queue for manual review
-    ledger.reserve(agentId, totalCost, withdrawalId);
+    // Already reserved above — queue for manual review
     db.insert(schema.withdrawals).values({
       id: withdrawalId,
       agentId,
@@ -298,7 +300,8 @@ auth.post("/withdraw", async (c) => {
     });
   }
 
-  // Debit balance first (atomic ledger entry)
+  // Convert reservation to debit
+  ledger.release(agentId, totalCost, withdrawalId);
   ledger.debit(agentId, totalCost, "withdrawal", "withdrawal", withdrawalId);
 
   db.update(schema.agents)

@@ -21,7 +21,8 @@ runMigrations();
 const app = new Hono<AppEnv>();
 
 // ─── Global middleware ───
-app.use("*", cors());
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || ["*"];
+app.use("*", cors({ origin: ALLOWED_ORIGINS }));
 app.use("*", logger());
 
 // ─── Static files (llms.txt, llms-full.txt) ───
