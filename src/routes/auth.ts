@@ -22,6 +22,7 @@ auth.post("/register", async (c) => {
   const agentId = `ag_${randomBytes(6).toString("hex")}`;
   const apiKey = `sk_live_${randomBytes(24).toString("hex")}`;
   const keyHash = hashApiKey(apiKey);
+  const myReferralCode = `ref_${randomBytes(4).toString("hex")}`;
 
   // Get next deposit index
   const maxIndex = db
@@ -30,37 +31,45 @@ auth.post("/register", async (c) => {
     .get();
   const depositIndex = (maxIndex?.max ?? -1) + 1;
 
+  // Look up referrer by their referral code
+  let referrerId: string | null = null;
+  if (referralCode) {
+    const referrer = db.select().from(schema.agents).where(eq(schema.agents.referralCode, referralCode)).get();
+    if (referrer) referrerId = referrer.id;
+  }
+
   db.insert(schema.agents).values({
     id: agentId,
     apiKeyHash: keyHash,
     depositIndex,
-    referredBy: referralCode ?? null,
+    referralCode: myReferralCode,
+    referredBy: referrerId,
   }).run();
 
   // Create referral record if referred
-  if (referralCode) {
-    const referrer = db.select().from(schema.agents).where(eq(schema.agents.id, referralCode)).get();
-    if (referrer) {
-      db.insert(schema.referrals).values({
-        referrerId: referralCode,
-        referredId: agentId,
-        commissionRate: 0.10, // 10% of net losses
-      }).run();
-    }
+  if (referrerId) {
+    db.insert(schema.referrals).values({
+      referrerId: referrerId,
+      referredId: agentId,
+      commissionRate: 0.10, // 10% of net losses
+    }).run();
   }
 
   return c.json({
     agent_id: agentId,
     api_key: apiKey,
+    referral_code: myReferralCode,
     balance: 0.0,
     tier: "free",
     risk_factor: 0.25,
+    referral_commission: "10% of net losses from referred agents",
     message: "Store your API key securely — it cannot be recovered.",
     next_steps: [
       "GET /api/v1/auth/balance — check your balance",
       "POST /api/v1/auth/deposit-address — get a deposit address",
       "POST /api/v1/games/coin-flip — place your first bet",
       "GET /api/v1/games — see all available games",
+      "Share your referral_code — earn 10% of referred agents net losses",
     ],
   }, 201);
 });
@@ -402,6 +411,41 @@ auth.get("/withdrawals", async (c) => {
     .all();
 
   return c.json({ withdrawals: rows });
+});
+
+
+// ─── Referral Stats ───
+
+auth.get("/referral/code", async (c) => {
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+  return c.json({
+    referral_code: agent.referralCode,
+    commission_rate: "10% of net losses from referred agents",
+    share_message: "Sign up at api.purpleflea.com/v1/casino with referral_code: " + agent.referralCode,
+  });
+});
+
+auth.get("/referral/stats", async (c) => {
+  const agentId = c.get("agentId") as string;
+  
+  const referrals_list = db
+    .select()
+    .from(schema.referrals)
+    .where(eq(schema.referrals.referrerId, agentId))
+    .all();
+
+  const totalEarned = referrals_list.reduce((sum, r) => sum + r.totalEarned, 0);
+  
+  return c.json({
+    total_referrals: referrals_list.length,
+    total_earned_usd: Math.round(totalEarned * 100) / 100,
+    commission_rate: "10%",
+    referrals: referrals_list.map(r => ({
+      referred_agent: r.referredId,
+      earned_usd: Math.round(r.totalEarned * 100) / 100,
+      since: new Date(r.createdAt * 1000).toISOString(),
+    })),
+  });
 });
 
 export { auth };

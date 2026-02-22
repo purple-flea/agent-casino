@@ -127,3 +127,28 @@ CREATE INDEX IF NOT EXISTS idx_bets_created ON bets(created_at);
 export function runMigrations() {
   sqlite.exec(migrations);
 }
+
+// Add referral_code column if missing
+try {
+  sqlite.exec("ALTER TABLE agents ADD COLUMN referral_code TEXT");
+  console.log("[migrate] Added referral_code column");
+} catch (e: any) {
+  if (!e.message?.includes("duplicate column")) throw e;
+}
+
+// Add unique index on referral_code
+try {
+  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_referral_code ON agents(referral_code) WHERE referral_code IS NOT NULL");
+  console.log("[migrate] Added referral_code unique index");
+} catch (e: any) {
+  // Index may already exist
+}
+
+// Backfill existing agents without referral codes
+import { randomBytes } from "crypto";
+const rows = sqlite.prepare("SELECT id FROM agents WHERE referral_code IS NULL").all() as any[];
+for (const row of rows) {
+  const code = `ref_${randomBytes(4).toString("hex")}`;
+  sqlite.prepare("UPDATE agents SET referral_code = ? WHERE id = ?").run(code, row.id);
+}
+if (rows.length > 0) console.log(`[migrate] Backfilled ${rows.length} referral codes`);

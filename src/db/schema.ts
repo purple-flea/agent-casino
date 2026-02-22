@@ -14,6 +14,7 @@ export const agents = sqliteTable("agents", {
   totalWon: real("total_won").default(0).notNull(),
   totalSpent: real("total_spent").default(0).notNull(),
   depositIndex: integer("deposit_index").unique().notNull(),
+  referralCode: text("referral_code"),
   referredBy: text("referred_by"),
   createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
   lastActive: integer("last_active"),
