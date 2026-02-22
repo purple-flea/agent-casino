@@ -163,7 +163,7 @@ auth.post("/deposit-address", async (c) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Service-Key": WALLET_SERVICE_KEY,
+        "X-Service-Key": WALLET_SERVICE_KEY!,
       },
       body: JSON.stringify({
         agent_id: agentId,
@@ -301,7 +301,7 @@ auth.post("/withdraw", async (c) => {
   }
 
   // Convert reservation to debit
-  ledger.release(agentId, totalCost, withdrawalId);
+  ledger.releaseReservation(agentId, withdrawalId, totalCost);
   ledger.debit(agentId, totalCost, "withdrawal", "withdrawal", withdrawalId);
 
   db.update(schema.agents)

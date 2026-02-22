@@ -92,7 +92,7 @@ async function pollDeposits(): Promise<void> {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "X-Service-Key": WALLET_SERVICE_KEY,
+              "X-Service-Key": WALLET_SERVICE_KEY!,
             },
             body: JSON.stringify({
               from_address: addr.address,
