@@ -12,6 +12,7 @@ if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 export const sqlite: DatabaseType = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");
 sqlite.pragma("foreign_keys = ON");
+sqlite.pragma("busy_timeout = 30000");
 
 export const db = drizzle(sqlite, { schema });
 export { schema };
