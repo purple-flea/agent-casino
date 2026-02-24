@@ -159,7 +159,7 @@ auth.post("/deposit-address", async (c) => {
   // Request real wallet address from wallet service
   let address: string;
   try {
-    const resp = await fetch(`${WALLET_SERVICE_URL}/v1/wallet/create`, {
+    const resp = await fetch(`${WALLET_SERVICE_URL}/v1/wallet/internal/create`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -182,9 +182,15 @@ auth.post("/deposit-address", async (c) => {
       }, 502);
     }
 
-    const walletData = await resp.json() as { address: string; addresses?: Record<string, string> };
+    const walletData = await resp.json() as { address?: string; addresses?: Array<{chain: string; address: string}> | Record<string, string> };
     // Wallet service may return a single address or chain-specific addresses
-    address = walletData.addresses?.[chain] ?? walletData.address;
+    // Wallet returns addresses as array [{chain, address}] — find the right one
+    const addrList = Array.isArray(walletData.addresses) ? walletData.addresses : [];
+    const evmChains = ["base", "ethereum", "arbitrum", "optimism", "polygon"];
+    const lookupChain = evmChains.includes(chain) && chain !== "ethereum" ? "ethereum" : chain;
+    address = addrList.find((a: any) => a.chain === chain)?.address
+           || addrList.find((a: any) => a.chain === lookupChain)?.address
+           || walletData.address;
 
     if (!address) {
       return c.json({
