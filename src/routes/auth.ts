@@ -129,7 +129,7 @@ auth.post("/deposit-address", async (c) => {
   const agent = c.get("agent") as typeof schema.agents.$inferSelect;
   const { chain } = await c.req.json();
 
-  const supportedChains = ["base", "ethereum", "arbitrum", "optimism", "polygon", "solana", "monero", "bitcoin", "lightning"];
+  const supportedChains = ["base", "ethereum", "bsc", "arbitrum", "optimism", "polygon", "solana", "monero", "bitcoin", "tron", "lightning"];
   if (!supportedChains.includes(chain)) {
     return c.json({
       error: "unsupported_chain",
@@ -186,7 +186,7 @@ auth.post("/deposit-address", async (c) => {
     // Wallet service may return a single address or chain-specific addresses
     // Wallet returns addresses as array [{chain, address}] — find the right one
     const addrList = Array.isArray(walletData.addresses) ? walletData.addresses : [];
-    const evmChains = ["base", "ethereum", "arbitrum", "optimism", "polygon"];
+    const evmChains = ["base", "ethereum", "bsc", "arbitrum", "optimism", "polygon"];
     const lookupChain = evmChains.includes(chain) && chain !== "ethereum" ? "ethereum" : chain;
     address = addrList.find((a: any) => a.chain === chain)?.address
            || addrList.find((a: any) => a.chain === lookupChain)?.address
