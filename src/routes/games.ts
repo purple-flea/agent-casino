@@ -8,6 +8,7 @@ import {
   playBatch,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
+import { checkRateLimit } from "../middleware/rateLimit.js";
 
 const games = new Hono<AppEnv>();
 
@@ -76,6 +77,10 @@ games.get("/", (c) => {
 
 games.post("/coin-flip", async (c) => {
   const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
   const { side, amount, client_seed } = await c.req.json();
 
   if (!["heads", "tails"].includes(side)) {
@@ -91,6 +96,10 @@ games.post("/coin-flip", async (c) => {
 
 games.post("/dice", async (c) => {
   const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
   const { direction, threshold, amount, client_seed } = await c.req.json();
 
   if (!["over", "under"].includes(direction)) {
@@ -106,6 +115,10 @@ games.post("/dice", async (c) => {
 
 games.post("/multiplier", async (c) => {
   const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
   const { target_multiplier, amount, client_seed } = await c.req.json();
 
   const result = playMultiplier(agentId, target_multiplier, amount, client_seed);
@@ -117,6 +130,10 @@ games.post("/multiplier", async (c) => {
 
 games.post("/roulette", async (c) => {
   const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
   const { bet_type, bet_value, amount, client_seed } = await c.req.json();
 
   const result = playRoulette(agentId, bet_type, bet_value, amount, client_seed);
@@ -128,6 +145,10 @@ games.post("/roulette", async (c) => {
 
 games.post("/custom", async (c) => {
   const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
   const { win_probability, amount, client_seed } = await c.req.json();
 
   const result = playCustom(agentId, win_probability, amount, client_seed);

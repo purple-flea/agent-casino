@@ -1,4 +1,4 @@
-const HOUSE_EDGE = 0.02;
+const HOUSE_EDGE = 0.005; // Matches games.ts (0.5% house edge)
 
 export interface KellyInput {
   bankroll: number;
