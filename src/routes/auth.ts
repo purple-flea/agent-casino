@@ -157,7 +157,7 @@ auth.post("/deposit-address", async (c) => {
   }
 
   // Request real wallet address from wallet service
-  let address: string;
+  let address: string | undefined;
   try {
     const resp = await fetch(`${WALLET_SERVICE_URL}/v1/wallet/internal/create`, {
       method: "POST",
@@ -197,6 +197,7 @@ auth.post("/deposit-address", async (c) => {
         error: "wallet_service_error",
         message: "Wallet service returned no address for this chain",
       }, 502);
+      return; // unreachable but satisfies TS
     }
   } catch (err) {
     console.error(`[deposit-address] Wallet service unreachable:`, err);
