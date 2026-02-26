@@ -169,7 +169,7 @@ app.get("/.well-known/agent.json", (c) => c.json({
   documentation: "https://casino.purpleflea.com/llms.txt",
   openapi: "https://casino.purpleflea.com/openapi.json",
   gossip: "https://casino.purpleflea.com/api/v1/gossip",
-  capabilities: ["coin-flip", "dice", "roulette", "blackjack", "crash", "plinko", "multiplier", "custom"],
+  capabilities: ["coin-flip", "dice", "roulette", "blackjack", "crash", "plinko", "multiplier", "custom", "slots"],
   referral: {
     program: "3-level",
     commission: "10% net losses",
@@ -420,6 +420,67 @@ api.get("/pricing", (c) => c.json({
     custom: { payout: "(1/prob)*0.98", probability: "You choose (1-99%)" },
   },
 }));
+
+// ─── Jackpot tracker (no auth — live jackpot pool display) ───
+api.get("/jackpot", (c) => {
+  c.header("Cache-Control", "public, max-age=15");
+
+  // Find the last jackpot win: slots bet with payoutMultiplier == 250 (triple 7)
+  const lastJackpot = db.select({
+    agentId: bets.agentId,
+    amountWon: bets.amountWon,
+    createdAt: bets.createdAt,
+  }).from(bets)
+    .where(sql`${bets.game} = 'slots' AND ${bets.payoutMultiplier} = 250 AND ${bets.won} = 1`)
+    .orderBy(desc(bets.createdAt))
+    .limit(1).get();
+
+  // Pool seed: grows from 1% of all slot losses since last jackpot (or all-time if never hit)
+  const since = lastJackpot?.createdAt ?? 0;
+  const slotStats = db.select({
+    totalLost: sql<number>`COALESCE(SUM(CASE WHEN won = 0 THEN amount ELSE 0 END), 0)`,
+    totalBets: sql<number>`COUNT(*)`,
+    recentWinners: sql<number>`SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END)`,
+  }).from(bets)
+    .where(sql`${bets.game} = 'slots' AND ${bets.createdAt} > ${since}`)
+    .get();
+
+  // Base jackpot: $10 + 1% of total slot losses since last hit
+  const basePool = 10;
+  const accumulated = (slotStats?.totalLost ?? 0) * 0.01;
+  const currentPool = Math.round((basePool + accumulated) * 100) / 100;
+
+  // All-time jackpot stats
+  const allTimeJackpots = db.select({
+    count: sql<number>`COUNT(*)`,
+    totalPaid: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+    biggestPaid: sql<number>`MAX(${bets.amountWon})`,
+  }).from(bets)
+    .where(sql`${bets.game} = 'slots' AND ${bets.payoutMultiplier} = 250 AND ${bets.won} = 1`)
+    .get();
+
+  return c.json({
+    jackpot: {
+      current_pool_usd: currentPool,
+      trigger: "Spin triple 7 on Slots (250x payout) to win the jackpot",
+      how_to_win: "POST /api/v1/games/slots — jackpot paid as 250x your bet PLUS the accumulated pool",
+      pool_feeds_from: "1% of all losing Slots bets since last jackpot hit",
+      min_bet_for_pool: 0.01,
+    },
+    last_jackpot: lastJackpot ? {
+      winner: lastJackpot.agentId.slice(0, 8) + "...",
+      amount_won: Math.round(lastJackpot.amountWon * 100) / 100,
+      at: new Date(lastJackpot.createdAt * 1000).toISOString(),
+    } : null,
+    stats: {
+      slots_played_since_last_hit: slotStats?.totalBets ?? 0,
+      all_time_jackpots_hit: allTimeJackpots?.count ?? 0,
+      all_time_total_paid: Math.round((allTimeJackpots?.totalPaid ?? 0) * 100) / 100,
+      biggest_jackpot_ever: Math.round((allTimeJackpots?.biggestPaid ?? 0) * 100) / 100,
+    },
+    tip: "Bigger bets = bigger jackpot if you hit triple 7s. Use Kelly Criterion to size bets: GET /api/v1/kelly/limits",
+  });
+});
 
 // ─── Demo endpoint (no auth — simulates games for discovery) ───
 api.post("/demo", async (c) => {
@@ -691,7 +752,7 @@ app.get("/", (c) => {
       registered_agents: agentCount,
       total_bets: betCount,
     },
-    games: ["coin-flip", "dice", "roulette", "multiplier", "custom", "blackjack", "crash", "plinko"],
+    games: ["coin-flip", "dice", "roulette", "multiplier", "custom", "blackjack", "crash", "plinko", "slots"],
     features: [
       "Provably fair via HMAC-SHA256 commit-reveal",
       "Kelly Criterion bankroll protection",
@@ -712,6 +773,7 @@ app.get("/", (c) => {
       active_tournaments: "GET /api/v1/tournaments — tournaments list, no auth",
       all_games: "GET /api/v1/games — full game list with rules, no auth",
       passive_income: "GET /api/v1/gossip — earn 10% commission on referrals",
+      jackpot: "GET /api/v1/jackpot — live jackpot pool + last winner, no auth",
     },
     docs: "/api/v1/docs",
     openapi: "/openapi.json",
