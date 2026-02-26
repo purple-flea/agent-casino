@@ -170,4 +170,92 @@ betsRouter.get("/history", (c) => {
   });
 });
 
+// ─── GET /bets/export.csv — download full bet history as CSV ───
+
+betsRouter.get("/export.csv", (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const game = c.req.query("game");
+  const outcome = c.req.query("outcome");
+  const since = c.req.query("since");
+  const until = c.req.query("until");
+
+  let conditions = [eq(schema.bets.agentId, agentId)];
+
+  if (game) {
+    const VALID_GAMES = ["coin_flip", "dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko", "slots"];
+    if (VALID_GAMES.includes(game)) conditions.push(eq(schema.bets.game, game));
+  }
+  if (outcome === "won") conditions.push(eq(schema.bets.won, true));
+  else if (outcome === "lost") conditions.push(eq(schema.bets.won, false));
+
+  if (since) {
+    const ts = Math.floor(new Date(since).getTime() / 1000);
+    if (!isNaN(ts)) conditions.push(sql`${schema.bets.createdAt} >= ${ts}`);
+  }
+  if (until) {
+    const ts = Math.floor(new Date(until).getTime() / 1000);
+    if (!isNaN(ts)) conditions.push(sql`${schema.bets.createdAt} <= ${ts}`);
+  }
+
+  const bets = db.select({
+    id: schema.bets.id,
+    game: schema.bets.game,
+    amount: schema.bets.amount,
+    amountWon: schema.bets.amountWon,
+    payoutMultiplier: schema.bets.payoutMultiplier,
+    won: schema.bets.won,
+    serverSeedHash: schema.bets.serverSeedHash,
+    clientSeed: schema.bets.clientSeed,
+    nonce: schema.bets.nonce,
+    resultHash: schema.bets.resultHash,
+    createdAt: schema.bets.createdAt,
+  })
+    .from(schema.bets)
+    .where(and(...conditions))
+    .orderBy(desc(schema.bets.createdAt))
+    .limit(10000) // max 10k rows per export
+    .all();
+
+  // Build CSV
+  const headers = [
+    "bet_id", "game", "amount_usd", "amount_won_usd", "net_usd",
+    "payout_multiplier", "won", "server_seed_hash", "client_seed",
+    "nonce", "result_hash", "timestamp_utc",
+  ];
+
+  const escapeCell = (val: string | number | boolean | null | undefined): string => {
+    const s = String(val ?? "");
+    if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+      return `"${s.replace(/"/g, '""')}"`;
+    }
+    return s;
+  };
+
+  const rows = bets.map(b => [
+    b.id,
+    b.game,
+    (Math.round(b.amount * 100) / 100).toFixed(2),
+    (Math.round(b.amountWon * 100) / 100).toFixed(2),
+    (Math.round((b.amountWon - b.amount) * 100) / 100).toFixed(2),
+    (Math.round(b.payoutMultiplier * 10000) / 10000).toString(),
+    b.won ? "true" : "false",
+    b.serverSeedHash ?? "",
+    b.clientSeed ?? "",
+    b.nonce?.toString() ?? "",
+    b.resultHash ?? "",
+    new Date(b.createdAt * 1000).toISOString(),
+  ].map(escapeCell).join(","));
+
+  const csv = [headers.join(","), ...rows].join("\r\n");
+
+  const filename = `bets_${agentId.slice(0, 8)}_${new Date().toISOString().slice(0, 10)}.csv`;
+
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  c.header("Cache-Control", "private, no-cache");
+
+  return c.body(csv);
+});
+
 export { betsRouter };
