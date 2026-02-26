@@ -228,6 +228,12 @@ const PURPLEFLEA_NETWORK = {
 app.get("/.well-known/purpleflea.json", (c) => c.json(PURPLEFLEA_NETWORK));
 app.get("/network", (c) => c.json(PURPLEFLEA_NETWORK));
 
+// ─── Ping (ultra-lightweight uptime check) ───
+app.get("/ping", (c) => {
+  c.header("Cache-Control", "no-cache");
+  return c.text("pong");
+});
+
 // ─── Health check ───
 const startTime = Date.now();
 app.get("/health", (c) => {
@@ -292,6 +298,7 @@ api.route("/challenges", challenges);
 
 // ─── Public stats (no auth) ───
 api.get("/public-stats", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
   const agentResult = db.select({ count: sql<number>`count(*)` }).from(agents).get();
   const betResult = db.select({ count: sql<number>`count(*)` }).from(bets).get();
   return c.json({
@@ -335,6 +342,7 @@ api.get("/recent-wins", (c) => {
 
 // ─── Gossip (no auth) ───
 api.get("/gossip", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
   const result = db.select({ count: sql<number>`count(*)` }).from(agents).get();
   const agentCount = result?.count ?? 0;
   return c.json({
