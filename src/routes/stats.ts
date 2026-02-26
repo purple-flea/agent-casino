@@ -296,4 +296,87 @@ stats.get("/referral-leaderboard", async (c) => {
   });
 });
 
+// ─── Profit leaderboard with time period filter (public) ───
+
+stats.get("/profit-leaderboard", async (c) => {
+  const period = c.req.query("period") ?? "all"; // all | week | month | today
+  const limitParam = Math.min(parseInt(c.req.query("limit") || "10"), 20);
+  c.header("Cache-Control", "public, max-age=30");
+
+  const now = Math.floor(Date.now() / 1000);
+  let sinceTs: number | null = null;
+  let periodLabel = "All Time";
+
+  if (period === "today") {
+    sinceTs = Math.floor(new Date().setUTCHours(0, 0, 0, 0) / 1000);
+    periodLabel = "Today (UTC)";
+  } else if (period === "week") {
+    sinceTs = now - 7 * 86400;
+    periodLabel = "Last 7 Days";
+  } else if (period === "month") {
+    sinceTs = now - 30 * 86400;
+    periodLabel = "Last 30 Days";
+  }
+
+  let leaderboard;
+
+  if (sinceTs !== null) {
+    // Time-filtered: compute from bets table
+    const betStats = db.select({
+      agentId: schema.bets.agentId,
+      totalWagered: sql<number>`COALESCE(SUM(${schema.bets.amount}), 0)`,
+      totalWon: sql<number>`COALESCE(SUM(${schema.bets.amountWon}), 0)`,
+      totalBets: sql<number>`COUNT(*)`,
+      wins: sql<number>`SUM(CASE WHEN ${schema.bets.won} = 1 THEN 1 ELSE 0 END)`,
+      biggestWin: sql<number>`COALESCE(MAX(${schema.bets.amountWon}), 0)`,
+    })
+      .from(schema.bets)
+      .where(sql`${schema.bets.createdAt} >= ${sinceTs}`)
+      .groupBy(schema.bets.agentId)
+      .orderBy(desc(sql`SUM(${schema.bets.amountWon}) - SUM(${schema.bets.amount})`))
+      .limit(limitParam)
+      .all();
+
+    leaderboard = betStats.map((s, i) => ({
+      rank: i + 1,
+      agent: s.agentId.slice(0, 8) + "...",
+      net_profit: Math.round((s.totalWon - s.totalWagered) * 100) / 100,
+      total_wagered: Math.round(s.totalWagered * 100) / 100,
+      total_bets: s.totalBets,
+      win_rate_pct: s.totalBets > 0 ? Math.round((s.wins / s.totalBets) * 10000) / 100 : 0,
+      biggest_win: Math.round(s.biggestWin * 100) / 100,
+    }));
+  } else {
+    // All-time: use agents aggregates (faster)
+    const agentStats = db.select({
+      id: schema.agents.id,
+      totalWagered: schema.agents.totalWagered,
+      totalWon: schema.agents.totalWon,
+    })
+      .from(schema.agents)
+      .orderBy(desc(sql`${schema.agents.totalWon} - ${schema.agents.totalWagered}`))
+      .limit(limitParam)
+      .all();
+
+    leaderboard = agentStats.map((a, i) => ({
+      rank: i + 1,
+      agent: a.id.slice(0, 8) + "...",
+      net_profit: Math.round((a.totalWon - a.totalWagered) * 100) / 100,
+      total_wagered: Math.round(a.totalWagered * 100) / 100,
+    }));
+  }
+
+  // Only show agents with positive net profit
+  const profitable = leaderboard.filter(e => e.net_profit > 0);
+
+  return c.json({
+    period: periodLabel,
+    leaderboard: profitable.length > 0 ? profitable : leaderboard.slice(0, limitParam),
+    profitable_count: profitable.length,
+    period_options: ["today", "week", "month", "all"],
+    tip: "Add ?period=week for last 7 days. ?period=today for today's top gainers.",
+    updated_at: new Date().toISOString(),
+  });
+});
+
 export { stats };
