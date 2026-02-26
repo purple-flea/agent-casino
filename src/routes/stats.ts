@@ -28,6 +28,55 @@ stats.get("/me", async (c) => {
   const totalBets = gameStats.reduce((s, g) => s + g.totalBets, 0);
   const totalWins = gameStats.reduce((s, g) => s + g.wins, 0);
 
+  // Streak analysis — last 50 bets ordered by time
+  const recentBets = db
+    .select({ won: schema.bets.won, amountWon: schema.bets.amountWon, amount: schema.bets.amount, createdAt: schema.bets.createdAt })
+    .from(schema.bets)
+    .where(eq(schema.bets.agentId, agentId))
+    .orderBy(desc(schema.bets.createdAt))
+    .limit(50)
+    .all();
+
+  let currentStreak = 0;
+  let currentStreakType: "win" | "loss" | null = null;
+  let bestWinStreak = 0;
+  let bestLossStreak = 0;
+  let tempStreak = 0;
+  let tempType: boolean | null = null;
+
+  for (const bet of recentBets) {
+    if (currentStreakType === null) {
+      currentStreakType = bet.won ? "win" : "loss";
+      currentStreak = 1;
+    } else if ((bet.won && currentStreakType === "win") || (!bet.won && currentStreakType === "loss")) {
+      currentStreak++;
+    } else {
+      break; // streak ended
+    }
+  }
+
+  // Full streak history for best streak
+  const allBets = db
+    .select({ won: schema.bets.won })
+    .from(schema.bets)
+    .where(eq(schema.bets.agentId, agentId))
+    .orderBy(desc(schema.bets.createdAt))
+    .all();
+
+  tempStreak = 0;
+  tempType = null;
+  for (const bet of allBets) {
+    if (tempType === null || tempType === bet.won) {
+      tempStreak++;
+      tempType = bet.won;
+      if (bet.won) bestWinStreak = Math.max(bestWinStreak, tempStreak);
+      else bestLossStreak = Math.max(bestLossStreak, tempStreak);
+    } else {
+      tempStreak = 1;
+      tempType = bet.won;
+    }
+  }
+
   return c.json({
     agent_id: agentId,
     balance: agent.balanceUsd,
@@ -39,6 +88,17 @@ stats.get("/me", async (c) => {
       win_rate: totalBets > 0 ? Math.round((totalWins / totalBets) * 10000) / 100 : 0,
       total_deposited: agent.totalDeposited,
       total_withdrawn: agent.totalWithdrawn,
+    },
+    streaks: {
+      current_streak: currentStreak,
+      current_streak_type: currentStreakType,
+      best_win_streak: bestWinStreak,
+      best_loss_streak: bestLossStreak,
+      tip: currentStreakType === "loss" && currentStreak >= 3
+        ? "You're on a loss streak — consider reducing bet size (Kelly Criterion: GET /api/v1/kelly/limits)"
+        : currentStreakType === "win" && currentStreak >= 3
+        ? "You're on a win streak — house edge still applies, consider locking in some profits"
+        : null,
     },
     by_game: gameStats.map((g) => ({
       game: g.game,
