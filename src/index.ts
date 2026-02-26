@@ -363,6 +363,157 @@ api.get("/game-stats", (c) => {
   });
 });
 
+// ─── House stats (no auth, 60s cache) — transparency & trust ───
+api.get("/house-stats", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const allBetStats = db.select({
+    totalBets: sql<number>`COUNT(*)`,
+    totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+    totalPaidOut: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+    wins: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+    biggestWin: sql<number>`COALESCE(MAX(${bets.amountWon}), 0)`,
+    biggestBet: sql<number>`COALESCE(MAX(${bets.amount}), 0)`,
+  }).from(bets).get();
+
+  const recentBetStats = db.select({
+    totalBets: sql<number>`COUNT(*)`,
+    totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+    totalPaidOut: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+    wins: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+  }).from(bets)
+    .where(sql`${bets.createdAt} >= ${Math.floor(Date.now() / 1000) - 86400}`)
+    .get();
+
+  const agentCount = db.select({ count: sql<number>`count(*)` }).from(agents).get()?.count ?? 0;
+
+  const totalWagered = allBetStats?.totalWagered ?? 0;
+  const totalPaidOut = allBetStats?.totalPaidOut ?? 0;
+  const houseProfit = totalWagered - totalPaidOut;
+  const houseEdgeRealized = totalWagered > 0 ? (houseProfit / totalWagered) * 100 : 0;
+  const playerWinRate = (allBetStats?.totalBets ?? 0) > 0
+    ? ((allBetStats?.wins ?? 0) / (allBetStats?.totalBets ?? 1)) * 100 : 0;
+
+  const r24hWagered = recentBetStats?.totalWagered ?? 0;
+  const r24hPaidOut = recentBetStats?.totalPaidOut ?? 0;
+
+  return c.json({
+    service: "agent-casino",
+    house_performance: {
+      total_bets_all_time: allBetStats?.totalBets ?? 0,
+      total_wagered_usd: Math.round(totalWagered * 100) / 100,
+      total_paid_out_usd: Math.round(totalPaidOut * 100) / 100,
+      house_net_profit_usd: Math.round(houseProfit * 100) / 100,
+      house_edge_realized_pct: Math.round(houseEdgeRealized * 100) / 100,
+      player_win_rate_pct: Math.round(playerWinRate * 100) / 100,
+      biggest_single_win_usd: Math.round((allBetStats?.biggestWin ?? 0) * 100) / 100,
+      biggest_single_bet_usd: Math.round((allBetStats?.biggestBet ?? 0) * 100) / 100,
+    },
+    last_24h: {
+      wagered_usd: Math.round(r24hWagered * 100) / 100,
+      paid_out_usd: Math.round(r24hPaidOut * 100) / 100,
+      bets: recentBetStats?.totalBets ?? 0,
+      house_profit_usd: Math.round((r24hWagered - r24hPaidOut) * 100) / 100,
+    },
+    players: {
+      total_registered: agentCount,
+      note: "All agents are AI agents. Purple Flea is an AI-native casino.",
+    },
+    fairness: {
+      system: "Provably fair via HMAC-SHA256 commit-reveal scheme",
+      verify: "GET /api/v1/fairness/verify to verify any bet result",
+      theoretical_house_edge: "0.5% on most games, 2-8.3% on blackjack/plinko/simple_dice",
+    },
+    updated: new Date().toISOString(),
+  });
+});
+
+// ─── Probability calculator (no auth, public) ─ agents compute EV before betting ───
+api.get("/probability-calculator", (c) => {
+  c.header("Cache-Control", "public, max-age=3600");
+  const game = c.req.query("game") || "";
+  const HOUSE_EDGE = 0.005;
+
+  const gameProfiles: Record<string, {
+    win_prob: number; payout: number; house_edge: string;
+    note: string; kelly_fraction: (b: number) => number;
+  }> = {
+    coin_flip: {
+      win_prob: 0.5, payout: 1.96, house_edge: "0.5%",
+      note: "50/50 odds, flat EV",
+      kelly_fraction: (bankroll: number) => bankroll * 0.0049,
+    },
+    simple_dice: {
+      win_prob: 1 / 6, payout: 5.5, house_edge: "8.3%",
+      note: "Pick 1-6, win 5.5x. House edge 8.3%",
+      kelly_fraction: (bankroll: number) => bankroll * 0.0028,
+    },
+    slots: {
+      win_prob: 0.35, payout: 3.0, house_edge: "~4%",
+      note: "Variable payout. Jackpot 250x but rare.",
+      kelly_fraction: (bankroll: number) => bankroll * 0.005,
+    },
+    blackjack: {
+      win_prob: 0.42, payout: 2.0, house_edge: "~2%",
+      note: "With basic strategy. Natural blackjack pays 1.5x.",
+      kelly_fraction: (bankroll: number) => bankroll * 0.01,
+    },
+    roulette: {
+      win_prob: 18 / 37, payout: 1.96, house_edge: "0.5%",
+      note: "European roulette, red/black bet",
+      kelly_fraction: (bankroll: number) => bankroll * 0.0049,
+    },
+  };
+
+  const bankroll = parseFloat(c.req.query("bankroll") || "100");
+  const betSize = parseFloat(c.req.query("bet_size") || "1");
+
+  if (game && gameProfiles[game]) {
+    const profile = gameProfiles[game];
+    const ev = profile.win_prob * (profile.payout - 1) * betSize - (1 - profile.win_prob) * betSize;
+    const evPct = (ev / betSize) * 100;
+    const kellySuggested = profile.kelly_fraction(bankroll);
+    const n100 = Math.pow(1 + evPct / 100, 100) - 1;
+
+    return c.json({
+      game,
+      win_probability: Math.round(profile.win_prob * 10000) / 100 + "%",
+      payout: profile.payout + "x",
+      house_edge: profile.house_edge,
+      bet_size_usd: betSize,
+      expected_value_per_bet: Math.round(ev * 1000) / 1000 + " USD",
+      expected_value_pct: Math.round(evPct * 100) / 100 + "%",
+      kelly_suggested_bet: Math.round(kellySuggested * 100) / 100,
+      kelly_note: `Kelly: bet $${Math.round(kellySuggested * 100) / 100} per play on a $${bankroll} bankroll`,
+      roi_100_bets: Math.round(n100 * 100) / 100 + "%",
+      note: profile.note,
+      verdict: evPct > 0 ? "positive_ev" : evPct > -1 ? "near_neutral_ev" : "negative_ev",
+      verdict_note: evPct >= 0 ? "Positive EV bet. Still subject to variance." : `Expected to lose ${Math.abs(Math.round(evPct * 100) / 100)}% per bet.`,
+    });
+  }
+
+  // Show all games comparison
+  const comparisons = Object.entries(gameProfiles).map(([g, p]) => {
+    const ev = p.win_prob * (p.payout - 1) - (1 - p.win_prob);
+    return {
+      game: g,
+      win_probability: Math.round(p.win_prob * 10000) / 100 + "%",
+      payout: p.payout + "x",
+      house_edge: p.house_edge,
+      ev_per_unit: Math.round(ev * 1000) / 1000,
+      kelly_bet_on_100_bankroll: Math.round(p.kelly_fraction(100) * 100) / 100,
+    };
+  }).sort((a, b) => parseFloat(b.ev_per_unit.toString()) - parseFloat(a.ev_per_unit.toString()));
+
+  return c.json({
+    note: "Add ?game=slots&bankroll=1000&bet_size=5 for specific game analysis",
+    available_games: Object.keys(gameProfiles),
+    comparison: comparisons,
+    formula: "EV = win_prob × (payout - 1) - (1 - win_prob) × 1",
+    kelly: "GET /api/v1/kelly/limits for your personalized Kelly limits",
+  });
+});
+
 // ─── Recent wins feed (no auth — social proof) ───
 api.get("/recent-wins", (c) => {
   const recentWins = db
@@ -574,6 +725,150 @@ api.get("/leaderboard", (c) => {
     total_agents_ranked: topAgents.length,
     updated: new Date().toISOString(),
     tip: "Period options: all (default), 24h, 7d. Limit 1-50.",
+  });
+});
+
+// ─── Multi-category leaderboard (no auth, 60s cache) ───
+api.get("/leaderboard-full", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  // Top 10 by net profit (all-time)
+  const byProfit = db.select({
+    id: agents.id,
+    totalWagered: agents.totalWagered,
+    totalWon: agents.totalWon,
+  }).from(agents)
+    .where(sql`${agents.totalWagered} > 0`)
+    .orderBy(desc(sql`${agents.totalWon} - ${agents.totalWagered}`))
+    .limit(10)
+    .all();
+
+  // Top 10 by total bets
+  const betCounts = db.select({
+    agentId: bets.agentId,
+    betCount: sql<number>`COUNT(*)`,
+    totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+  }).from(bets)
+    .groupBy(bets.agentId)
+    .orderBy(desc(sql`COUNT(*)`))
+    .limit(10)
+    .all();
+
+  // Top 10 by referral earnings
+  const refData = db.select({
+    referrerId: referrals.referrerId,
+    totalEarned: sql<number>`COALESCE(SUM(${referrals.totalEarned}), 0)`,
+    refCount: sql<number>`COUNT(*)`,
+  }).from(referrals)
+    .groupBy(referrals.referrerId)
+    .orderBy(desc(sql`SUM(${referrals.totalEarned})`))
+    .limit(10)
+    .all();
+
+  const totalAgents = db.select({ count: sql<number>`count(*)` }).from(agents).get()?.count ?? 0;
+  const totalBets = db.select({ count: sql<number>`count(*)` }).from(bets).get()?.count ?? 0;
+
+  return c.json({
+    service: "agent-casino",
+    updated: new Date().toISOString(),
+    by_net_profit: {
+      title: "Top 10 agents by all-time net profit",
+      entries: byProfit.map((a, i) => ({
+        rank: i + 1,
+        agent: a.id.slice(0, 6) + "...",
+        net_profit_usd: Math.round((a.totalWon - a.totalWagered) * 100) / 100,
+        total_wagered_usd: Math.round(a.totalWagered * 100) / 100,
+      })),
+    },
+    by_total_bets: {
+      title: "Top 10 agents by total bets placed",
+      entries: betCounts.map((a, i) => ({
+        rank: i + 1,
+        agent: a.agentId.slice(0, 6) + "...",
+        total_bets: a.betCount,
+        total_wagered_usd: Math.round(a.totalWagered * 100) / 100,
+      })),
+    },
+    by_referral_earnings: {
+      title: "Top 10 agents by referral commission earned",
+      entries: refData.map((r, i) => ({
+        rank: i + 1,
+        agent: r.referrerId.slice(0, 6) + "...",
+        total_referral_earned_usd: Math.round(r.totalEarned * 100) / 100,
+        referral_count: r.refCount,
+      })),
+    },
+    network: {
+      total_agents: totalAgents,
+      total_bets_all_time: totalBets,
+    },
+    quick_leaderboard: "GET /api/v1/leaderboard for net-profit-only leaderboard with time filters",
+    join: "POST /api/v1/auth/register — earn 10% referral commission on every net loss from agents you refer",
+  });
+});
+
+// ─── Activity feed (public, 30s cache) ───
+api.get("/feed", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const recentBets = db.select({
+    id: bets.id,
+    agentId: bets.agentId,
+    game: bets.game,
+    amount: bets.amount,
+    amountWon: bets.amountWon,
+    won: bets.won,
+    payoutMultiplier: bets.payoutMultiplier,
+    createdAt: bets.createdAt,
+  }).from(bets)
+    .orderBy(desc(bets.createdAt))
+    .limit(20)
+    .all();
+
+  const GAME_VERBS: Record<string, string> = {
+    coin_flip: "flipped a coin",
+    dice: "rolled dice",
+    simple_dice: "rolled a die",
+    multiplier: "played multiplier",
+    roulette: "spun roulette",
+    custom: "placed a custom bet",
+    blackjack: "played blackjack",
+    crash: "played crash",
+    plinko: "dropped plinko",
+    slots: "spun slots",
+  };
+
+  const feed = recentBets.map((b) => {
+    const agent = b.agentId.slice(0, 6);
+    const verb = GAME_VERBS[b.game] || `played ${b.game}`;
+    const outcome = b.won
+      ? `won ${Math.round(b.amountWon * 100) / 100} USDC (${b.payoutMultiplier}x)`
+      : `lost ${Math.round(b.amount * 100) / 100} USDC`;
+    return {
+      event: `Agent ${agent}... ${verb} and ${outcome}`,
+      agent: agent + "...",
+      game: b.game,
+      amount: Math.round(b.amount * 100) / 100,
+      won: b.won,
+      payout: b.won ? Math.round(b.amountWon * 100) / 100 : 0,
+      multiplier: b.payoutMultiplier,
+      at: new Date(b.createdAt * 1000).toISOString(),
+    };
+  });
+
+  const totalBets = db.select({ count: sql<number>`count(*)` }).from(bets).get()?.count ?? 0;
+  const totalWon = db.select({ v: sql<number>`COALESCE(SUM(CASE WHEN ${bets.won} = 1 THEN ${bets.amountWon} ELSE 0 END), 0)` }).from(bets).get()?.v ?? 0;
+
+  return c.json({
+    service: "agent-casino",
+    feed,
+    stats: {
+      total_bets_all_time: totalBets,
+      total_paid_out_usd: Math.round(totalWon * 100) / 100,
+    },
+    note: "Last 20 bets. Agent IDs anonymized to first 6 chars. Updates every 30s.",
+    register: "POST /api/v1/auth/register to start playing",
+    updated: new Date().toISOString(),
   });
 });
 
@@ -996,7 +1291,7 @@ api.post("/demo", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { game = "coin_flip", amount = 1 } = body as { game?: string; amount?: number };
 
-  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "blackjack", "crash", "plinko"];
+  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "blackjack", "crash", "plinko", "simple_dice"];
   if (!supportedGames.includes(game)) {
     return c.json({ error: "unsupported_game", supported: supportedGames }, 400);
   }
@@ -1030,6 +1325,12 @@ api.post("/demo", async (c) => {
     const crashPoint = Math.max(1, 100 / (1 - (parseInt(hmac.slice(0, 8), 16) % 9901) / 10000));
     const won = crashPoint >= target;
     result = { crash_point: Math.round(crashPoint * 100) / 100, target_multiplier: target, won, payout: won ? amount * target : 0 };
+  } else if (game === "simple_dice") {
+    const body2 = body as { pick?: number };
+    const pick = typeof body2.pick === "number" && body2.pick >= 1 && body2.pick <= 6 ? body2.pick : 1;
+    const rolled = (parseInt(hmac.slice(0, 8), 16) % 6) + 1;
+    const won = rolled === pick;
+    result = { pick, rolled, won, payout: won ? amount * 5.5 : 0, house_edge: "8.33%", payout_if_win: "5.5x" };
   } else {
     const won = roll < 45;
     result = { roll: Math.round(roll * 100) / 100, won, payout: won ? amount * 2 : 0 };

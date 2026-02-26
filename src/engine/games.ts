@@ -867,6 +867,49 @@ export function playSlots(
   );
 }
 
+// ─── Simple Dice (pick 1-6, win 5.5x) ───
+
+export function playSimpleDice(
+  agentId: string,
+  pick: number,
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  if (!Number.isInteger(pick) || pick < 1 || pick > 6) {
+    return { error: "invalid_pick", message: "Pick must be an integer between 1 and 6" };
+  }
+
+  const winProb = 1 / 6; // ~16.67%
+  const payout = 5.5;    // 5.5x payout = 8.3% house edge
+
+  const validation = validateAndReserve(agentId, amount, winProb, payout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const rawResult = calculateResult(seed.seed, cs, nonce);
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+  const rolled = (Math.floor(rawResult) % 6) + 1; // 1-6
+  const won = rolled === pick;
+
+  return settleBet(
+    agentId, betId, amount, won, payout,
+    "simple_dice",
+    {
+      pick,
+      rolled,
+      won,
+      payout_if_win: `${payout}x`,
+      house_edge_pct: 8.33,
+      note: "Pick 1-6 — if rolled matches, you win 5.5x your bet",
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  );
+}
+
 // ─── Batch Betting ───
 
 interface BatchBetInput {
@@ -883,6 +926,7 @@ interface BatchBetInput {
   cash_out_at?: number;
   rows?: 8 | 12 | 16;
   risk?: "low" | "medium" | "high";
+  pick?: number;
   client_seed?: string;
 }
 
@@ -911,6 +955,8 @@ export function playBatch(agentId: string, bets: BatchBetInput[]): (BetResult | 
         return playPlinko(agentId, bet.rows || 8, bet.risk || "low", bet.amount, bet.client_seed);
       case "slots":
         return playSlots(agentId, bet.amount, bet.client_seed);
+      case "simple_dice":
+        return playSimpleDice(agentId, bet.pick || 3, bet.amount, bet.client_seed);
       default:
         return { error: "unknown_game", message: `Unknown game: ${bet.game}` };
     }

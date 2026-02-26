@@ -9,6 +9,7 @@ import {
   playCrash,
   playPlinko,
   playSlots,
+  playSimpleDice,
   playBatch,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
@@ -116,6 +117,16 @@ games.get("/", (c) => {
           "2x CHERRY": "2x",
           "1x CHERRY (reel 1)": "1x",
         },
+      },
+      {
+        id: "simple_dice",
+        name: "Simple Dice",
+        description: "Pick a number 1-6. If the die rolls your number, you win 5.5x. House edge 8.3%.",
+        house_edge: "8.3%",
+        payout: "5.5x",
+        endpoint: "POST /api/v1/games/simple-dice",
+        params: { pick: "1-6 (integer)", amount: "number", client_seed: "string (optional)" },
+        example: { pick: 3, amount: 10, "expected_if_win": 55 },
       },
     ],
     batch_endpoint: "POST /api/v1/bets/batch",
@@ -266,6 +277,21 @@ games.post("/slots", async (c) => {
   const { amount, client_seed } = await c.req.json();
 
   const result = playSlots(agentId, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Simple Dice (pick 1-6, win 5.5x, 8.3% house edge) ───
+
+games.post("/simple-dice", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { pick, amount, client_seed } = await c.req.json();
+
+  const result = playSimpleDice(agentId, pick, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });
