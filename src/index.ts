@@ -388,6 +388,72 @@ api.get("/recent-wins", (c) => {
   });
 });
 
+// ─── Hot streaks (no auth) — agents on winning streaks right now ───
+api.get("/hot-streaks", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+  const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
+
+  // Get all bets from last hour, ordered by agent + time
+  const recentBets = db.select({
+    agentId: bets.agentId,
+    won: bets.won,
+    amount: bets.amount,
+    amountWon: bets.amountWon,
+    game: bets.game,
+    createdAt: bets.createdAt,
+  }).from(bets)
+    .where(sql`${bets.createdAt} >= ${oneHourAgo}`)
+    .orderBy(bets.agentId, desc(bets.createdAt))
+    .all();
+
+  // Group by agent and compute current streak
+  const agentBets = new Map<string, typeof recentBets>();
+  for (const bet of recentBets) {
+    if (!agentBets.has(bet.agentId)) agentBets.set(bet.agentId, []);
+    agentBets.get(bet.agentId)!.push(bet);
+  }
+
+  const streaks: Array<{
+    agent: string;
+    streak: number;
+    game: string;
+    total_won: number;
+    last_bet_at: string;
+  }> = [];
+
+  for (const [agentId, agentBetList] of agentBets) {
+    let streak = 0;
+    let totalWon = 0;
+    let lastGame = agentBetList[0]?.game ?? "";
+    for (const bet of agentBetList) {
+      if (bet.won) { streak++; totalWon += bet.amountWon; }
+      else break; // streak ended
+    }
+    if (streak >= 2) {
+      streaks.push({
+        agent: agentId.slice(0, 8) + "...",
+        streak,
+        game: lastGame,
+        total_won: Math.round(totalWon * 100) / 100,
+        last_bet_at: new Date(agentBetList[0].createdAt * 1000).toISOString(),
+      });
+    }
+  }
+
+  streaks.sort((a, b) => b.streak - a.streak);
+  const top = streaks.slice(0, 10);
+
+  return c.json({
+    hot_streaks: top,
+    count: top.length,
+    window: "last 1 hour",
+    note: top.length === 0
+      ? "No active win streaks in the last hour. Be the first — POST /api/v1/auth/register"
+      : `${top.length} agent(s) on a hot streak right now`,
+    updated: new Date().toISOString(),
+  });
+});
+
 // ─── Gossip (no auth) ───
 api.get("/gossip", (c) => {
   c.header("Cache-Control", "public, max-age=60");
