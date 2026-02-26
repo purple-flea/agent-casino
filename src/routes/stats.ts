@@ -237,4 +237,63 @@ stats.get("/leaderboard", async (c) => {
   });
 });
 
+// ─── Referral leaderboard (public) ───
+
+stats.get("/referral-leaderboard", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  // Top referrers by total commission earned (from referrals table total_earned)
+  const topReferrers = db
+    .select({
+      referrerId: schema.referrals.referrerId,
+      totalEarned: sql<number>`COALESCE(SUM(${schema.referrals.totalEarned}), 0)`,
+      referralCount: sql<number>`COUNT(*)`,
+    })
+    .from(schema.referrals)
+    .groupBy(schema.referrals.referrerId)
+    .orderBy(desc(sql`SUM(${schema.referrals.totalEarned})`))
+    .limit(10)
+    .all();
+
+  // Look up referral codes for display
+  const enriched = topReferrers.map((r, i) => {
+    const agent = db.select({
+      referralCode: schema.agents.referralCode,
+      createdAt: schema.agents.createdAt,
+    }).from(schema.agents).where(eq(schema.agents.id, r.referrerId)).get();
+
+    return {
+      rank: i + 1,
+      agent_id: r.referrerId.slice(0, 8) + "...",
+      referral_code: agent?.referralCode ?? null,
+      total_earned_usd: Math.round(r.totalEarned * 100) / 100,
+      referral_count: r.referralCount,
+      member_since: agent?.createdAt
+        ? new Date(agent.createdAt * 1000).toISOString().slice(0, 10)
+        : null,
+    };
+  });
+
+  // Network-wide referral stats
+  const networkStats = db.select({
+    totalReferrals: sql<number>`COUNT(*)`,
+    totalCommissions: sql<number>`COALESCE(SUM(${schema.referrals.totalEarned}), 0)`,
+  }).from(schema.referrals).get();
+
+  return c.json({
+    referral_leaderboard: enriched,
+    network: {
+      total_referral_relationships: networkStats?.totalReferrals ?? 0,
+      total_commissions_paid_usd: Math.round((networkStats?.totalCommissions ?? 0) * 100) / 100,
+    },
+    how_to_join: {
+      step_1: "POST /api/v1/auth/register to get your referral code",
+      step_2: "Share your code — earn 10% of referred agents net losses",
+      step_3: "3-level deep: earn on who your referrals refer too",
+      commission_structure: "Level 1: 10%, Level 2: 5%, Level 3: 2.5%",
+    },
+    updated_at: new Date().toISOString(),
+  });
+});
+
 export { stats };
