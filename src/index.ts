@@ -460,6 +460,157 @@ api.get("/hot-streaks", (c) => {
   });
 });
 
+// ─── Game strategy guide (no auth) ───
+
+api.get("/strategy", (c) => {
+  const game = c.req.query("game");
+
+  const strategies: Record<string, object> = {
+    coin_flip: {
+      game: "coin_flip",
+      house_edge: "0.5%",
+      payout: "1.96x",
+      win_probability: "50%",
+      optimal_strategy: "Flat betting — no skill involved. Variance is symmetric.",
+      kelly_fraction: 0.49,
+      bankroll_advice: [
+        "Bet no more than 5% of bankroll per flip (lower is safer)",
+        "Kelly optimal is ~0.49% of bankroll (very conservative)",
+        "Expected loss per $1 bet: $0.005 (half a cent)",
+        "Streaks are normal — 10 losses in a row happens ~1 in 1024 sessions",
+      ],
+      avoid: ["Martingale (doubling after losses) — will eventually bust any bankroll"],
+    },
+    dice: {
+      game: "dice",
+      house_edge: "0.5% (on all targets)",
+      win_probability: "Agent-chosen (1-99%)",
+      optimal_strategy: "Choose a win probability that matches your risk tolerance. Lower probability = higher payout but higher variance.",
+      bankroll_advice: [
+        "High probability (90% win chance, 1.09x payout): Very low variance, grind-friendly",
+        "Sweet spot: 40-60% win probability for balanced variance vs payout",
+        "Kelly formula: f = (p * b - (1-p)) / b, where b = payout-1, p = win_prob",
+      ],
+      example_bets: [
+        { target: 90, direction: "under", win_prob: "90%", payout: "1.088x", note: "Low variance, grinding" },
+        { target: 50, direction: "under", win_prob: "50%", payout: "1.96x", note: "Balanced" },
+        { target: 10, direction: "under", win_prob: "10%", payout: "9.8x", note: "High variance, lottery-style" },
+      ],
+    },
+    roulette: {
+      game: "roulette",
+      house_edge: "0.5%",
+      optimal_strategy: "Even-money bets (red/black/odd/even) for lowest variance. Number bets for high-risk plays.",
+      bankroll_advice: [
+        "Stick to red/black/odd/even for the most stable results",
+        "Single-number bets: 2.7% win chance, enormous variance — size very small",
+        "Never bet more than 2% of bankroll on a single number",
+      ],
+      bet_types: [
+        { type: "red/black/odd/even", win_prob: "49.75%", payout: "1.96x", variance: "low" },
+        { type: "dozen", win_prob: "32.43%", payout: "2.94x", variance: "medium" },
+        { type: "single number", win_prob: "2.7%", payout: "34.3x", variance: "very high" },
+      ],
+    },
+    multiplier: {
+      game: "multiplier",
+      house_edge: "0.5%",
+      optimal_strategy: "Low multiplier targets (1.5x-3x) for consistent wins. High multiplier (50x+) is pure speculation.",
+      bankroll_advice: [
+        "Target 2x: ~49% win chance — similar to coin flip with lower variance",
+        "Target 10x: ~9.9% win chance — high variance, needs deep bankroll",
+        "Use fixed small percentages (0.5-1%) of bankroll for high multiplier plays",
+      ],
+    },
+    blackjack: {
+      game: "blackjack",
+      house_edge: "~0.5% with basic strategy",
+      payout: "1:1 (or 3:2 for natural blackjack)",
+      optimal_strategy: "Follow basic strategy chart exactly. Never take insurance.",
+      basic_strategy_summary: {
+        "17+": "Always stand",
+        "13-16": "Stand vs dealer 2-6, hit vs 7+",
+        "11": "Double down if possible, otherwise hit",
+        "8 or less": "Always hit",
+        "AA/88": "Always split",
+        "10-10/5-5": "Never split",
+      },
+      bankroll_advice: "Blackjack with basic strategy is the best EV game. Size at 1-2% of bankroll per hand.",
+    },
+    crash: {
+      game: "crash",
+      house_edge: "0.5%",
+      optimal_strategy: "Set a fixed target multiplier and auto cash-out. Don't get greedy.",
+      cashout_strategies: [
+        { target: "1.5x", win_prob: "~65%", note: "Conservative" },
+        { target: "2x", win_prob: "~50%", note: "Balanced" },
+        { target: "5x", win_prob: "~20%", note: "Aggressive" },
+      ],
+      bankroll_advice: "2x cashout with 1% bankroll bets is a sustainable grind strategy.",
+    },
+    plinko: {
+      game: "plinko",
+      house_edge: "0.5%",
+      optimal_strategy: "Choose row count to control variance. More rows = more extreme outcomes.",
+      bankroll_advice: "Treat like a slot machine — small bets, entertainment value.",
+    },
+    slots: {
+      game: "slots",
+      house_edge: "0.5%",
+      payout: "Variable (jackpot can be 1000x+)",
+      optimal_strategy: "Pure chance. No strategy affects outcome. Manage bankroll for entertainment.",
+      bankroll_advice: [
+        "Set a strict loss limit before starting (e.g., 10% of bankroll max)",
+        "Small frequent bets > large infrequent bets for same expected cost",
+      ],
+    },
+    custom: {
+      game: "custom",
+      house_edge: "0.5%",
+      payout: "(1/probability) * 0.995",
+      optimal_strategy: "Choose your probability and size Kelly-optimally.",
+      kelly_formula: "f* = (p * b - (1-p)) / b, where b = payout-1, p = win_probability",
+    },
+  };
+
+  if (game) {
+    const strategy = strategies[game];
+    if (!strategy) {
+      return c.json({
+        error: "unknown_game",
+        message: `No strategy for game: ${game}`,
+        available_games: Object.keys(strategies),
+      }, 404);
+    }
+    return c.json({ game, strategy, tip: "Use GET /api/v1/kelly for bankroll sizing" });
+  }
+
+  return c.json({
+    overview: {
+      house_edge: "All games have the same 0.5% house edge — lowest in the industry",
+      key_principle: "Provably fair cryptographic randomness. Every outcome is independent.",
+      universal_rules: [
+        "Never chase losses — negative EV compounds losses",
+        "Use Kelly Criterion for bet sizing (GET /api/v1/kelly/recommend)",
+        "Set a session loss limit before playing (e.g., 20% of bankroll)",
+        "Flat betting outperforms martingale or progressive systems long-term",
+      ],
+      expected_loss_formula: "Expected loss = bet_size × house_edge × number_of_bets",
+      example: "100 bets × $1 bet × 0.5% = $0.50 expected loss. Variance can swing ±$20+",
+    },
+    games_by_variance: {
+      lowest: ["blackjack (basic strategy)", "dice (90% target)", "multiplier (1.5x target)"],
+      medium: ["coin_flip", "dice (50% target)", "roulette (red/black)", "crash (2x cashout)"],
+      highest: ["slots", "plinko (high rows)", "roulette (single number)", "crash (10x+)"],
+    },
+    strategies,
+    kelly_calculator: "GET /api/v1/kelly/recommend",
+    session_analytics: "GET /api/v1/session/current",
+    game_statistics: "GET /api/v1/game-stats",
+    tip: "Add ?game=blackjack for detailed strategy for a specific game",
+  });
+});
+
 // ─── Gossip (no auth) ───
 api.get("/gossip", (c) => {
   c.header("Cache-Control", "public, max-age=60");
