@@ -257,11 +257,14 @@ auth.post("/withdraw", async (c) => {
   const token = "USDC";
   const fee = 0.50; // flat fee covers gas
 
-  if (!amount || amount <= 0) {
-    return c.json({ error: "invalid_amount", suggestion: "Amount must be positive" }, 400);
+  if (!amount || typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) {
+    return c.json({ error: "invalid_amount", suggestion: "Amount must be a positive finite number" }, 400);
   }
   if (amount < 1) {
     return c.json({ error: "minimum_withdrawal", minimum: 1.0, suggestion: "Minimum withdrawal is $1.00" }, 400);
+  }
+  if (amount > 100_000) {
+    return c.json({ error: "maximum_withdrawal", maximum: 100000, suggestion: "Maximum single withdrawal is $100,000. Contact support for larger amounts." }, 400);
   }
   if (!address || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
     return c.json({ error: "invalid_address", suggestion: "Provide a valid Base/Ethereum address (0x followed by 40 hex characters)" }, 400);
