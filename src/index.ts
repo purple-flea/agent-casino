@@ -460,6 +460,123 @@ api.get("/hot-streaks", (c) => {
   });
 });
 
+// ─── Leaderboard (no auth) — top agents by net profit, all-time and 24h ───
+
+api.get("/leaderboard", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const period = c.req.query("period") ?? "all";
+  const limit = Math.min(parseInt(c.req.query("limit") ?? "10", 10), 50);
+
+  let whereClause: ReturnType<typeof sql> | undefined;
+  let windowLabel = "all-time";
+
+  if (period === "24h") {
+    const since = Math.floor(Date.now() / 1000) - 86400;
+    whereClause = sql`${bets.createdAt} >= ${since}`;
+    windowLabel = "last 24 hours";
+  } else if (period === "7d") {
+    const since = Math.floor(Date.now() / 1000) - 604800;
+    whereClause = sql`${bets.createdAt} >= ${since}`;
+    windowLabel = "last 7 days";
+  }
+
+  // For time-windowed periods, aggregate from bets table directly
+  if (whereClause) {
+    const rows = db
+      .select({
+        agentId: bets.agentId,
+        totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+        totalWon: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+        betCount: sql<number>`COUNT(*)`,
+        winCount: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+        biggestWin: sql<number>`COALESCE(MAX(${bets.amountWon}), 0)`,
+      })
+      .from(bets)
+      .where(whereClause)
+      .groupBy(bets.agentId)
+      .all();
+
+    // Sort by net profit descending
+    rows.sort((a, b) => (b.totalWon - b.totalWagered) - (a.totalWon - a.totalWagered));
+    const topRows = rows.slice(0, limit);
+
+    return c.json({
+      leaderboard: topRows.map((r, i) => ({
+        rank: i + 1,
+        agent: r.agentId.slice(0, 8) + "...",
+        net_profit: Math.round((r.totalWon - r.totalWagered) * 100) / 100,
+        total_wagered: Math.round(r.totalWagered * 100) / 100,
+        total_won: Math.round(r.totalWon * 100) / 100,
+        bets: r.betCount,
+        wins: r.winCount,
+        win_rate_pct: r.betCount > 0 ? Math.round((r.winCount / r.betCount) * 10000) / 100 : 0,
+        biggest_win: Math.round(r.biggestWin * 100) / 100,
+      })),
+      period,
+      window: windowLabel,
+      total_agents_ranked: rows.length,
+      updated: new Date().toISOString(),
+      tip: "Period options: all (default), 24h, 7d. Limit 1-50.",
+    });
+  }
+
+  // All-time: use denormalized totals on agents table (fast)
+  const topAgents = db
+    .select({
+      id: agents.id,
+      totalWagered: agents.totalWagered,
+      totalWon: agents.totalWon,
+      lastActive: agents.lastActive,
+      createdAt: agents.createdAt,
+    })
+    .from(agents)
+    .where(sql`${agents.totalWagered} > 0`)
+    .all();
+
+  // Sort by net profit
+  topAgents.sort((a, b) => (b.totalWon - b.totalWagered) - (a.totalWon - a.totalWagered));
+  const top = topAgents.slice(0, limit);
+
+  // Fetch per-agent bet counts from bets table
+  const betStats = db
+    .select({
+      agentId: bets.agentId,
+      betCount: sql<number>`COUNT(*)`,
+      winCount: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+      biggestWin: sql<number>`COALESCE(MAX(${bets.amountWon}), 0)`,
+    })
+    .from(bets)
+    .groupBy(bets.agentId)
+    .all();
+
+  const statsByAgent = new Map(betStats.map(s => [s.agentId, s]));
+
+  return c.json({
+    leaderboard: top.map((a, i) => {
+      const s = statsByAgent.get(a.id);
+      const betCount = s?.betCount ?? 0;
+      const winCount = s?.winCount ?? 0;
+      return {
+        rank: i + 1,
+        agent: a.id.slice(0, 8) + "...",
+        net_profit: Math.round((a.totalWon - a.totalWagered) * 100) / 100,
+        total_wagered: Math.round(a.totalWagered * 100) / 100,
+        total_won: Math.round(a.totalWon * 100) / 100,
+        bets: betCount,
+        wins: winCount,
+        win_rate_pct: betCount > 0 ? Math.round((winCount / betCount) * 10000) / 100 : 0,
+        biggest_win: Math.round((s?.biggestWin ?? 0) * 100) / 100,
+        last_active: a.lastActive ? new Date(a.lastActive * 1000).toISOString() : null,
+      };
+    }),
+    period,
+    window: windowLabel,
+    total_agents_ranked: topAgents.length,
+    updated: new Date().toISOString(),
+    tip: "Period options: all (default), 24h, 7d. Limit 1-50.",
+  });
+});
+
 // ─── Game temperature (no auth) — which games are running hot/cold ───
 
 api.get("/game-temperature", (c) => {
