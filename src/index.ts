@@ -19,6 +19,7 @@ import { tournaments } from "./routes/tournaments.js";
 import { challenges } from "./routes/challenges.js";
 import { daily } from "./routes/daily.js";
 import { achievements } from "./routes/achievements.js";
+import { session } from "./routes/session.js";
 import { startDepositMonitor } from "./crypto/deposits.js";
 import type { AppEnv } from "./types.js";
 
@@ -299,6 +300,8 @@ api.route("/tournaments", tournaments);
 api.route("/challenges", challenges);
 api.route("/daily", daily);
 api.route("/achievements", achievements);
+api.use("/session/*", authMiddleware);
+api.route("/session", session);
 
 // ─── Public stats (no auth) ───
 api.get("/public-stats", (c) => {
@@ -319,6 +322,9 @@ api.get("/public-stats", (c) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// ─── /stats alias (no auth) — for economy dashboard ───
+api.get("/stats", (c) => c.redirect("/api/v1/public-stats", 301));
 
 // ─── Per-game analytics (no auth) — useful for agents choosing games ───
 api.get("/game-stats", (c) => {
