@@ -460,6 +460,107 @@ api.get("/hot-streaks", (c) => {
   });
 });
 
+// ─── Game temperature (no auth) — which games are running hot/cold ───
+
+api.get("/game-temperature", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const windowHours = Math.min(parseInt(c.req.query("hours") || "1"), 24);
+  const since = Math.floor(Date.now() / 1000) - windowHours * 3600;
+
+  // Recent bets per game
+  const gameStats = db.select({
+    game: bets.game,
+    totalBets: sql<number>`COUNT(*)`,
+    wins: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+    totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+    totalPaidOut: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+    biggestWin: sql<number>`COALESCE(MAX(${bets.amountWon}), 0)`,
+  })
+    .from(bets)
+    .where(sql`${bets.createdAt} >= ${since}`)
+    .groupBy(bets.game)
+    .all();
+
+  if (gameStats.length === 0) {
+    return c.json({
+      message: "No bets in this window yet",
+      window_hours: windowHours,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  const EXPECTED_WIN_RATE = 49.75; // ~50% theoretical with 0.5% house edge
+
+  const enriched = gameStats.map(g => {
+    const winRate = g.totalBets > 0 ? (g.wins / g.totalBets) * 100 : 0;
+    const rtp = g.totalWagered > 0 ? (g.totalPaidOut / g.totalWagered) * 100 : 0;
+    const deviation = winRate - EXPECTED_WIN_RATE;
+
+    // Temperature: hot = players winning more than expected
+    let temperature: string;
+    let tempScore: number;
+    if (g.totalBets < 3) {
+      temperature = "insufficient_data";
+      tempScore = 50;
+    } else if (deviation > 10) {
+      temperature = "🔥 blazing";
+      tempScore = Math.min(100, 70 + deviation);
+    } else if (deviation > 5) {
+      temperature = "🌶️ hot";
+      tempScore = 65 + deviation;
+    } else if (deviation < -10) {
+      temperature = "🧊 ice cold";
+      tempScore = Math.max(0, 30 + deviation);
+    } else if (deviation < -5) {
+      temperature = "❄️ cold";
+      tempScore = 35 + deviation;
+    } else {
+      temperature = "🎯 balanced";
+      tempScore = 50 + deviation;
+    }
+
+    return {
+      game: g.game,
+      temperature,
+      temp_score: Math.round(tempScore),
+      bets_in_window: g.totalBets,
+      win_rate_pct: Math.round(winRate * 100) / 100,
+      expected_win_rate_pct: EXPECTED_WIN_RATE,
+      rtp_pct: Math.round(rtp * 100) / 100,
+      total_paid_out: Math.round(g.totalPaidOut * 100) / 100,
+      biggest_win: Math.round(g.biggestWin * 100) / 100,
+      note: deviation > 5
+        ? `${g.game} is paying out above average — players are on a hot run`
+        : deviation < -5
+        ? `${g.game} is below average payout — house running cold`
+        : `${g.game} is running near expected odds`,
+    };
+  }).sort((a, b) => b.temp_score - a.temp_score);
+
+  const hotGames = enriched.filter(g => g.temperature.includes("hot") || g.temperature.includes("blazing"));
+  const coldGames = enriched.filter(g => g.temperature.includes("cold"));
+
+  return c.json({
+    window_hours: windowHours,
+    games: enriched,
+    hottest_game: enriched[0] ?? null,
+    coldest_game: enriched[enriched.length - 1] ?? null,
+    summary: {
+      hot_games: hotGames.map(g => g.game),
+      cold_games: coldGames.map(g => g.game),
+      tip: hotGames.length > 0
+        ? `${hotGames[0].game} is running hot right now`
+        : "No games running significantly above expected odds",
+    },
+    how_to_interpret: {
+      hot: "Players winning more than statistical average — variance spike in players' favor",
+      cold: "Players winning less than average — house capturing more edge than expected",
+      note: "All games have 0.5% house edge over millions of bets. Short-term variance causes temperature swings.",
+    },
+    updated_at: new Date().toISOString(),
+  });
+});
+
 // ─── Game strategy guide (no auth) ───
 
 api.get("/strategy", (c) => {
