@@ -22,7 +22,12 @@ function round2(n: number) { return Math.round(n * 100) / 100; }
 
 challenges.post("/", async (c) => {
   const challengerId = c.get("agentId") as string;
-  const body = await c.req.json();
+  let body: { challenged_agent_id?: string; game?: string; amount?: number; message?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "invalid_json", message: "Request body must be valid JSON" }, 400);
+  }
   const { challenged_agent_id, game, amount, message } = body;
 
   if (!challenged_agent_id || !game || amount == null) {
@@ -284,6 +289,35 @@ challenges.post("/:id/decline", async (c) => {
   }).where(eq(schema.challenges.id, id)).run();
 
   return c.json({ challenge_id: id, status: "declined", message: "Challenge declined. Challenger's funds have been returned." });
+});
+
+// ─── GET /challenges/open — public list of open challenges (no auth) ───
+// NOTE: registered in index.ts before auth middleware, so it bypasses auth
+challenges.get("/open", (c) => {
+  const open = db.select({
+    id: schema.challenges.id,
+    challengerId: schema.challenges.challengerId,
+    game: schema.challenges.game,
+    amount: schema.challenges.amount,
+    createdAt: schema.challenges.createdAt,
+  }).from(schema.challenges)
+    .where(eq(schema.challenges.status, "pending"))
+    .orderBy(sql`${schema.challenges.createdAt} DESC`)
+    .limit(20)
+    .all();
+
+  return c.json({
+    open_challenges: open.map(c => ({
+      id: c.id,
+      challenger: c.challengerId.slice(0, 8) + "...",
+      game: c.game,
+      amount: c.amount,
+      posted_at: new Date(c.createdAt * 1000).toISOString(),
+      how_to_accept: `POST /api/v1/challenges/${c.id}/accept (requires auth)`,
+    })),
+    tip: "Register to challenge or accept challenges: POST /api/v1/auth/register",
+    updated_at: new Date().toISOString(),
+  });
 });
 
 export { challenges };
