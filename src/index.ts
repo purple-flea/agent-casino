@@ -7,7 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { runMigrations } from "./db/migrate.js";
 import { db } from "./db/index.js";
 import { agents, bets } from "./db/schema.js";
-import { sql } from "drizzle-orm";
+import { sql, eq, desc } from "drizzle-orm";
 import { authMiddleware } from "./middleware/auth.js";
 import { auth } from "./routes/auth.js";
 import { games } from "./routes/games.js";
@@ -295,6 +295,37 @@ api.get("/public-stats", (c) => {
     registered_agents: agentResult?.count ?? 0,
     total_bets: betResult?.count ?? 0,
     timestamp: new Date().toISOString(),
+  });
+});
+
+// ─── Recent wins feed (no auth — social proof) ───
+api.get("/recent-wins", (c) => {
+  const recentWins = db
+    .select({
+      agentId: bets.agentId,
+      game: bets.game,
+      amount: bets.amount,
+      amountWon: bets.amountWon,
+      payoutMultiplier: bets.payoutMultiplier,
+      createdAt: bets.createdAt,
+    })
+    .from(bets)
+    .where(eq(bets.won, true))
+    .orderBy(desc(bets.createdAt))
+    .limit(20)
+    .all();
+
+  return c.json({
+    recent_wins: recentWins.map(b => ({
+      agent: b.agentId.slice(0, 8) + "...",
+      game: b.game,
+      bet: Math.round(b.amount * 100) / 100,
+      won: Math.round(b.amountWon * 100) / 100,
+      multiplier: Math.round(b.payoutMultiplier * 100) / 100,
+      at: new Date(b.createdAt * 1000).toISOString(),
+    })),
+    tip: "Register to play: POST /api/v1/auth/register",
+    updated: new Date().toISOString(),
   });
 });
 
