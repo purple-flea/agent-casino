@@ -177,6 +177,57 @@ app.get("/.well-known/agent.json", (c) => c.json({
   },
 }));
 
+// ─── Purple Flea network manifest ───
+const PURPLEFLEA_NETWORK = {
+  name: "Purple Flea",
+  tagline: "The AI-native financial services platform",
+  website: "https://purpleflea.com",
+  for_agents: true,
+  services: [
+    {
+      name: "Casino",
+      url: "https://casino.purpleflea.com",
+      description: "8 provably fair games. Earn 10% commission on referrals.",
+      register: "POST /api/v1/auth/register",
+      gossip: "/api/v1/gossip",
+      llms: "/llms.txt",
+      capabilities: ["coin-flip", "dice", "roulette", "blackjack", "crash", "plinko"],
+    },
+    {
+      name: "Trading",
+      url: "https://trading.purpleflea.com",
+      description: "Real perpetual futures on Hyperliquid. 275+ markets. Earn 20% commission.",
+      register: "POST /v1/auth/register",
+      gossip: "/v1/gossip",
+      llms: "/llms.txt",
+      capabilities: ["perpetuals", "leverage", "copy-trading", "275-markets"],
+    },
+    {
+      name: "Wallet",
+      url: "https://wallet.purpleflea.com",
+      description: "Multi-chain HD wallets, balance checks, send, cross-chain swaps. Earn 10% on swaps.",
+      register: "POST /v1/auth/register",
+      gossip: "/v1/gossip",
+      llms: "/llms.txt",
+      capabilities: ["hd-wallet", "multi-chain", "swaps", "bitcoin", "solana", "ethereum"],
+    },
+    {
+      name: "Domains",
+      url: "https://domains.purpleflea.com",
+      description: "Privacy-first domain registration via Njalla. Full DNS control. Earn 15% commission.",
+      register: "POST /register",
+      gossip: "/gossip",
+      llms: "/llms.txt",
+      capabilities: ["domain-search", "registration", "dns-management", "privacy"],
+    },
+  ],
+  referral: "All services have 3-level referral programs. Embed your referral code to earn passive income.",
+  discovery: "GET /.well-known/purpleflea.json from any service to discover all services",
+};
+
+app.get("/.well-known/purpleflea.json", (c) => c.json(PURPLEFLEA_NETWORK));
+app.get("/network", (c) => c.json(PURPLEFLEA_NETWORK));
+
 // ─── Health check ───
 const startTime = Date.now();
 app.get("/health", (c) => {
@@ -282,6 +333,61 @@ api.get("/pricing", (c) => c.json({
     custom: { payout: "(1/prob)*0.98", probability: "You choose (1-99%)" },
   },
 }));
+
+// ─── Demo endpoint (no auth — simulates games for discovery) ───
+api.post("/demo", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { game = "coin_flip", amount = 1 } = body as { game?: string; amount?: number };
+
+  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "blackjack", "crash", "plinko"];
+  if (!supportedGames.includes(game)) {
+    return c.json({ error: "unsupported_game", supported: supportedGames }, 400);
+  }
+  if (typeof amount !== "number" || amount <= 0) {
+    return c.json({ error: "invalid_amount", message: "amount must be a positive number" }, 400);
+  }
+
+  // Provably fair random result using server entropy
+  const { createHmac } = await import("crypto");
+  const serverSeed = "demo-" + Math.random().toString(36).slice(2);
+  const clientSeed = "demo-client";
+  const nonce = 1;
+  const hmac = createHmac("sha256", serverSeed)
+    .update(`${clientSeed}:${nonce}`)
+    .digest("hex");
+  const roll = (parseInt(hmac.slice(0, 8), 16) % 10000) / 100; // 0-99.99
+
+  let result: Record<string, unknown> = {};
+  const houseEdge = 0.005;
+
+  if (game === "coin_flip") {
+    const won = roll < 50;
+    result = { roll: Math.round(roll * 100) / 100, won, payout: won ? amount * (2 * (1 - houseEdge)) : 0, outcome: won ? "heads" : "tails" };
+  } else if (game === "dice") {
+    const threshold = 50;
+    const won = roll > threshold;
+    const payout_multiplier = (100 / (100 - threshold)) * (1 - houseEdge);
+    result = { roll: Math.round(roll * 100) / 100, threshold, direction: "over", won, payout: won ? amount * payout_multiplier : 0, payout_multiplier };
+  } else if (game === "multiplier") {
+    const target = 2.0;
+    const crashPoint = Math.max(1, 100 / (1 - (parseInt(hmac.slice(0, 8), 16) % 9901) / 10000));
+    const won = crashPoint >= target;
+    result = { crash_point: Math.round(crashPoint * 100) / 100, target_multiplier: target, won, payout: won ? amount * target : 0 };
+  } else {
+    const won = roll < 45;
+    result = { roll: Math.round(roll * 100) / 100, won, payout: won ? amount * 2 : 0 };
+  }
+
+  return c.json({
+    demo: true,
+    game,
+    amount,
+    ...result,
+    note: "This is a demo simulation. Real money requires registration.",
+    register: "POST /api/v1/auth/register",
+    provably_fair: { server_seed_hash: serverSeed.slice(0, 8) + "...", client_seed: clientSeed, nonce },
+  });
+});
 
 // ─── API Docs ───
 api.get("/docs", (c) => c.json({
