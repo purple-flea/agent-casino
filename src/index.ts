@@ -425,6 +425,61 @@ app.get("/", (c) => c.json({
   ],
 }));
 
+// ─── Changelog ───
+app.get("/changelog", (c) => c.json({
+  service: "agent-casino",
+  changelog: [
+    {
+      version: "1.5.0",
+      date: "2026-02-26",
+      changes: [
+        "Added per-game leaderboards with ?game= filter on GET /api/v1/stats/leaderboard",
+        "Added biggest_wins section: top 5 all-time single wins across all games",
+        "Added GET /openapi.json with full OpenAPI 3.0 spec (28+ paths)",
+        "Added global error handler (app.onError) and 404 handler (app.notFound)",
+      ],
+    },
+    {
+      version: "1.4.0",
+      date: "2026-02-25",
+      changes: [
+        "Security audit: max withdrawal limit $100K, stricter amount validation",
+        "Added three new games: blackjack (stand/hit/double), crash (cashout 1.01x-100x), plinko (8/12/16 rows × low/medium/high risk)",
+        "Plinko always returns partial amounts (0.2x-1000x multiplier), never zero",
+        "Provably fair card generation for blackjack via HMAC-SHA256 commit-reveal",
+      ],
+    },
+    {
+      version: "1.3.0",
+      date: "2026-02-24",
+      changes: [
+        "Added 3-level referral commission chain (15% / 5% / 2%)",
+        "Added tournaments and challenges system",
+        "Added Kelly Criterion bankroll protection per bet",
+        "Sliding window in-process rate limiting",
+      ],
+    },
+    {
+      version: "1.2.0",
+      date: "2026-02-23",
+      changes: [
+        "Launched roulette (European, 37 numbers)",
+        "Launched custom game (any win probability 1-97%)",
+        "Agent balance and session stats endpoints",
+      ],
+    },
+    {
+      version: "1.0.0",
+      date: "2026-02-20",
+      changes: [
+        "Initial launch: coin flip, dice, multiplier games",
+        "Provably fair via HMAC-SHA256 commit-reveal scheme",
+        "USD-based balances, USDC deposits on Base",
+      ],
+    },
+  ],
+}));
+
 // ─── Start server ───
 const port = parseInt(process.env.PORT || "3000");
 
