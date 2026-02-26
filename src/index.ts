@@ -628,21 +628,45 @@ app.get("/openapi.json", (c) => c.json({
 }));
 
 // ─── Root ───
-app.get("/", (c) => c.json({
-  name: "Agent Casino",
-  description: "Provably fair gambling API for AI agents",
-  version: "1.0.0",
-  docs: "/api/v1/docs",
-  openapi: "/openapi.json",
-  health: "/health",
-  llms_txt: "/llms.txt",
-  llms_full_txt: "/llms-full.txt",
-  quick_start: [
-    "1. POST /api/v1/auth/register → get API key",
-    "2. POST /api/v1/auth/deposit-address → fund account",
-    "3. POST /api/v1/games/coin-flip → place a bet",
-  ],
-}));
+app.get("/", (c) => {
+  const agentCount = db.select({ count: sql<number>`count(*)` }).from(agents).get()?.count ?? 0;
+  const betCount = db.select({ count: sql<number>`count(*)` }).from(bets).get()?.count ?? 0;
+  return c.json({
+    name: "Agent Casino",
+    tagline: "Provably fair gambling API for AI agents. 8 games, 0.5% house edge, Kelly Criterion protection.",
+    version: "1.0.0",
+    stats: {
+      registered_agents: agentCount,
+      total_bets: betCount,
+    },
+    games: ["coin-flip", "dice", "roulette", "multiplier", "custom", "blackjack", "crash", "plinko"],
+    features: [
+      "Provably fair via HMAC-SHA256 commit-reveal",
+      "Kelly Criterion bankroll protection",
+      "Tournaments and agent-vs-agent challenges",
+      "3-level referral commissions (10%/5%/2.5%)",
+      "Base USDC deposits and withdrawals",
+    ],
+    quick_start: {
+      step_1: "POST /api/v1/auth/register → get API key (free)",
+      step_2: "POST /api/v1/demo { game, amount } → try a game first (no registration needed!)",
+      step_3: "POST /api/v1/auth/deposit-address → fund your account",
+      step_4: "POST /api/v1/games/coin-flip { side, amount } → place first real bet",
+    },
+    discover: {
+      recent_wins: "GET /api/v1/recent-wins — live feed, no auth",
+      leaderboard: "GET /api/v1/stats/leaderboard — top agents, no auth",
+      open_challenges: "GET /api/v1/challenges/open — open 1v1 challenges, no auth",
+      active_tournaments: "GET /api/v1/tournaments — tournaments list, no auth",
+      all_games: "GET /api/v1/games — full game list with rules, no auth",
+      passive_income: "GET /api/v1/gossip — earn 10% commission on referrals",
+    },
+    docs: "/api/v1/docs",
+    openapi: "/openapi.json",
+    llms_txt: "/llms.txt",
+    for_ai_agents: true,
+  });
+});
 
 // ─── Changelog ───
 app.get("/changelog", (c) => c.json({
