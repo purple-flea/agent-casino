@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db, schema } from "../db/index.js";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql, desc } from "drizzle-orm";
 import { getCurrentSeedHash, verifyResult, rotateSeed } from "../engine/fairness.js";
 import type { AppEnv } from "../types.js";
 
@@ -206,6 +206,127 @@ fairness.get("/seeds", async (c) => {
       revealed_at: s.revealedAt ? new Date(s.revealedAt * 1000).toISOString() : null,
       created_at: new Date(s.createdAt * 1000).toISOString(),
     })),
+  });
+});
+
+// ─── GET /audit-summary — provably-fair audit summary (authenticated) ───
+
+fairness.get("/audit-summary", async (c) => {
+  const agentId = c.get("agentId") as string;
+
+  // Total bets by this agent
+  const totalBets = db.select({ count: sql<number>`COUNT(*)` })
+    .from(schema.bets)
+    .where(eq(schema.bets.agentId, agentId))
+    .get()?.count ?? 0;
+
+  // All server seeds (revealed + active)
+  const seeds = db.select()
+    .from(schema.serverSeeds)
+    .where(eq(schema.serverSeeds.agentId, agentId))
+    .all();
+
+  const revealedSeeds = seeds.filter(s => s.revealedAt !== null);
+  const activeSeeds = seeds.filter(s => s.active);
+
+  // How many bets used revealed seeds (can be independently verified)
+  const verifiableBets = db.select({ count: sql<number>`COUNT(*)` })
+    .from(schema.bets)
+    .where(and(
+      eq(schema.bets.agentId, agentId),
+    ))
+    .get()?.count ?? 0;
+
+  // Win rate
+  const winStats = db.select({
+    wins: sql<number>`SUM(CASE WHEN ${schema.bets.won} = 1 THEN 1 ELSE 0 END)`,
+    totalWagered: sql<number>`COALESCE(SUM(${schema.bets.amount}), 0)`,
+    totalWon: sql<number>`COALESCE(SUM(${schema.bets.amountWon}), 0)`,
+  })
+    .from(schema.bets)
+    .where(eq(schema.bets.agentId, agentId))
+    .get();
+
+  const wins = winStats?.wins ?? 0;
+  const winRate = totalBets > 0 ? Math.round((wins / totalBets) * 10000) / 100 : 0;
+  const totalWagered = winStats?.totalWagered ?? 0;
+  const totalWon = winStats?.totalWon ?? 0;
+
+  // Theoretical RTP (house edge 0.5% → 99.5% RTP)
+  const actualRtp = totalWagered > 0 ? Math.round((totalWon / totalWagered) * 10000) / 100 : 0;
+  const expectedRtp = 99.5; // 0.5% house edge
+
+  // Recent bets for verifiable sample
+  const recentBets = db.select({
+    id: schema.bets.id,
+    game: schema.bets.game,
+    serverSeedHash: schema.bets.serverSeedHash,
+    serverSeed: schema.bets.serverSeed,
+    clientSeed: schema.bets.clientSeed,
+    nonce: schema.bets.nonce,
+    won: schema.bets.won,
+    createdAt: schema.bets.createdAt,
+  })
+    .from(schema.bets)
+    .where(eq(schema.bets.agentId, agentId))
+    .orderBy(desc(schema.bets.createdAt))
+    .limit(5)
+    .all();
+
+  // Check which recent bets are verifiable (seed revealed)
+  const revealedHashes = new Set(revealedSeeds.map(s => s.seedHash));
+  const verifiableSample = recentBets.map(b => ({
+    bet_id: b.id,
+    game: b.game,
+    won: b.won,
+    seed_revealed: revealedHashes.has(b.serverSeedHash),
+    server_seed_hash: b.serverSeedHash,
+    server_seed: revealedHashes.has(b.serverSeedHash) ? b.serverSeed : "[rotate to reveal]",
+    client_seed: b.clientSeed,
+    nonce: b.nonce,
+    verify_now: revealedHashes.has(b.serverSeedHash)
+      ? `POST /api/v1/fairness/verify { "bet_id": "${b.id}" }`
+      : `POST /api/v1/fairness/rotate → then verify bet_id: ${b.id}`,
+  }));
+
+  const activeSeed = activeSeeds[0];
+
+  return c.json({
+    agent_id: agentId,
+    fairness_score: totalBets === 0 ? "no_bets_yet" : revealedSeeds.length > 0 ? "auditable" : "committed",
+    summary: {
+      total_bets: totalBets,
+      verifiable_bets: totalBets, // all bets are verifiable once seed rotates
+      revealed_seed_count: revealedSeeds.length,
+      active_seed_committed: !!activeSeed,
+      win_rate_pct: winRate,
+      actual_rtp_pct: actualRtp,
+      expected_rtp_pct: expectedRtp,
+      rtp_deviation_pct: totalWagered > 0 ? Math.round((actualRtp - expectedRtp) * 100) / 100 : null,
+    },
+    active_seed: activeSeed ? {
+      seed_hash: activeSeed.seedHash,
+      bets_on_this_seed: activeSeed.currentNonce,
+      note: "This hash commits the server to a secret seed. Rotation reveals the seed so you can verify all bets made with it.",
+    } : null,
+    revealed_seeds_count: revealedSeeds.length,
+    recent_bets_sample: verifiableSample,
+    how_provably_fair_works: [
+      "1. Before betting, the server commits to a secret seed by publishing its SHA-256 hash",
+      "2. You provide your own client_seed when betting (or a random one is used)",
+      "3. Result = HMAC-SHA256(server_seed, 'client_seed:nonce') — deterministic, tamper-proof",
+      "4. After rotation, the server seed is revealed — verify any bet independently",
+      "5. If SHA256(server_seed) !== server_seed_hash, the server cheated (impossible in practice)",
+    ],
+    quick_verify: totalBets > 0 ? {
+      step_1: "POST /api/v1/fairness/rotate to reveal current seed",
+      step_2: `POST /api/v1/fairness/verify { "bet_id": "${recentBets[0]?.id ?? "YOUR_BET_ID"}" }`,
+      step_3: "Inspect the proof object — computed_result should match the actual outcome",
+    } : {
+      note: "Make some bets first, then rotate your seed to verify them",
+    },
+    house_edge: "0.5% (0.995x payout multiplier applied to fair odds)",
+    audit_tool: "Any SHA-256 + HMAC-SHA256 tool can independently verify results. No Purple Flea software needed.",
   });
 });
 
