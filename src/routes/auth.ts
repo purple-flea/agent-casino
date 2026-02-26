@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { randomBytes, randomUUID } from "crypto";
 import { db, schema } from "../db/index.js";
-import { eq, sql, desc } from "drizzle-orm";
+import { eq, sql, desc, and, gte } from "drizzle-orm";
 import { hashApiKey } from "../middleware/auth.js";
 import { ledger } from "../wallet/ledger.js";
 import { authMiddleware } from "../middleware/auth.js";
@@ -443,21 +443,52 @@ auth.get("/referral/code", async (c) => {
 
 auth.get("/referral/stats", async (c) => {
   const agentId = c.get("agentId") as string;
-  
+
   const referrals_list = db
     .select()
     .from(schema.referrals)
     .where(eq(schema.referrals.referrerId, agentId))
     .all();
 
+  // Split by level based on commission rate (L1=10%, L2=5%, L3=2.5%)
+  const level1 = referrals_list.filter(r => r.commissionRate >= 0.099);
+  const level2 = referrals_list.filter(r => r.commissionRate >= 0.049 && r.commissionRate < 0.099);
+  const level3 = referrals_list.filter(r => r.commissionRate < 0.049);
+
   const totalEarned = referrals_list.reduce((sum, r) => sum + r.totalEarned, 0);
-  
+  const earnedL1 = level1.reduce((sum, r) => sum + r.totalEarned, 0);
+  const earnedL2 = level2.reduce((sum, r) => sum + r.totalEarned, 0);
+  const earnedL3 = level3.reduce((sum, r) => sum + r.totalEarned, 0);
+
+  // 30-day earnings from ledger (credits with reason containing "referral")
+  const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 86400;
+  const recentEarnings = db
+    .select({ total: sql<number>`COALESCE(SUM(amount), 0)` })
+    .from(schema.ledgerEntries)
+    .where(and(
+      eq(schema.ledgerEntries.agentId, agentId),
+      eq(schema.ledgerEntries.type, "credit"),
+      gte(schema.ledgerEntries.createdAt, thirtyDaysAgo),
+      sql`${schema.ledgerEntries.reason} LIKE '%referral%'`,
+    ))
+    .get();
+
   return c.json({
     total_referrals: referrals_list.length,
     total_earned_usd: Math.round(totalEarned * 100) / 100,
-    commission_rate: "10%",
+    last_30_days_usd: Math.round((recentEarnings?.total ?? 0) * 100) / 100,
+    by_level: {
+      level_1: { count: level1.length, commission: "10%", earned_usd: Math.round(earnedL1 * 100) / 100 },
+      level_2: { count: level2.length, commission: "5%", earned_usd: Math.round(earnedL2 * 100) / 100 },
+      level_3: { count: level3.length, commission: "2.5%", earned_usd: Math.round(earnedL3 * 100) / 100 },
+    },
+    grow_tip: level1.length > 0
+      ? `${level1.length} direct referral(s). Encourage them to refer more agents for Level 2 income.`
+      : "Share your referral code to earn 10% of referred agents' net losses.",
     referrals: referrals_list.map(r => ({
-      referred_agent: r.referredId,
+      referred_agent: r.referredId.slice(0, 8) + "...",
+      level: r.commissionRate >= 0.099 ? 1 : r.commissionRate >= 0.049 ? 2 : 3,
+      commission: `${Math.round(r.commissionRate * 100)}%`,
       earned_usd: Math.round(r.totalEarned * 100) / 100,
       since: new Date(r.createdAt * 1000).toISOString(),
     })),
