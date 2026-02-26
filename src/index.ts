@@ -6,7 +6,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 
 import { runMigrations } from "./db/migrate.js";
 import { db } from "./db/index.js";
-import { agents, bets } from "./db/schema.js";
+import { agents, bets, referrals } from "./db/schema.js";
 import { sql, eq, desc } from "drizzle-orm";
 import { authMiddleware } from "./middleware/auth.js";
 import { auth } from "./routes/auth.js";
@@ -574,6 +574,70 @@ api.get("/leaderboard", (c) => {
     total_agents_ranked: topAgents.length,
     updated: new Date().toISOString(),
     tip: "Period options: all (default), 24h, 7d. Limit 1-50.",
+  });
+});
+
+// ─── Referral leaderboard (no auth) — top earners by commission ───
+
+api.get("/referral-leaderboard", (c) => {
+  c.header("Cache-Control", "public, max-age=300");
+  const limit = Math.min(parseInt(c.req.query("limit") ?? "10", 10), 50);
+
+  // Aggregate commission per referrer across all referral levels
+  const allReferrals = db
+    .select({
+      referrerId: referrals.referrerId,
+      totalEarned: referrals.totalEarned,
+      commissionRate: referrals.commissionRate,
+      createdAt: referrals.createdAt,
+    })
+    .from(referrals)
+    .all();
+
+  // Group by referrer
+  const byReferrer = new Map<string, { totalEarned: number; referralCount: number; levels: Record<string, number>; since: number }>();
+  for (const r of allReferrals) {
+    if (!byReferrer.has(r.referrerId)) {
+      byReferrer.set(r.referrerId, { totalEarned: 0, referralCount: 0, levels: { l1: 0, l2: 0, l3: 0 }, since: r.createdAt });
+    }
+    const entry = byReferrer.get(r.referrerId)!;
+    entry.totalEarned += r.totalEarned;
+    entry.referralCount++;
+    if (r.createdAt < entry.since) entry.since = r.createdAt;
+    // Infer level from commission rate
+    if (r.commissionRate >= 0.09) entry.levels.l1++;
+    else if (r.commissionRate >= 0.04) entry.levels.l2++;
+    else entry.levels.l3++;
+  }
+
+  // Sort by total earned descending
+  const sorted = [...byReferrer.entries()]
+    .sort((a, b) => b[1].totalEarned - a[1].totalEarned)
+    .slice(0, limit);
+
+  const totalCommissionPaid = allReferrals.reduce((s, r) => s + r.totalEarned, 0);
+  const uniqueReferrers = byReferrer.size;
+
+  return c.json({
+    leaderboard: sorted.map(([referrerId, data], i) => ({
+      rank: i + 1,
+      agent: referrerId.slice(0, 8) + "...",
+      total_earned_usd: Math.round(data.totalEarned * 100) / 100,
+      total_referrals: data.referralCount,
+      referral_levels: data.levels,
+      member_since: new Date(data.since * 1000).toISOString().slice(0, 10),
+    })),
+    stats: {
+      total_referrers: uniqueReferrers,
+      total_commission_paid_usd: Math.round(totalCommissionPaid * 100) / 100,
+    },
+    earn_too: {
+      how: "Register and share your referral code",
+      commission: "10% of net losses from L1 referrals, 5% L2, 2.5% L3",
+      register: "POST /api/v1/auth/register",
+      your_code: "GET /api/v1/auth/referral/code (after registering)",
+    },
+    updated: new Date().toISOString(),
   });
 });
 
