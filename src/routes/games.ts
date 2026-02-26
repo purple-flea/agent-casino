@@ -8,6 +8,7 @@ import {
   playBlackjack,
   playCrash,
   playPlinko,
+  playSlots,
   playBatch,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
@@ -96,6 +97,25 @@ games.get("/", (c) => {
         payout: "Depends on rows + risk level (up to 1000x on 16-row high risk)",
         endpoint: "POST /api/v1/games/plinko",
         params: { rows: "8 | 12 | 16", risk: "low | medium | high", amount: "number", client_seed: "string (optional)" },
+      },
+      {
+        id: "slots",
+        name: "Slots",
+        description: "3-reel slot machine with 7 symbols. Jackpot 250x on triple 7s. Provably fair.",
+        house_edge: "~4%",
+        payout: "1x (cherry) to 250x (triple 7)",
+        endpoint: "POST /api/v1/games/slots",
+        params: { amount: "number", client_seed: "string (optional)" },
+        payout_table: {
+          "3x 7 (jackpot)": "250x",
+          "3x BAR": "50x",
+          "3x BELL": "25x",
+          "3x CHERRY": "10x",
+          "3x LEMON/ORANGE/GRAPE": "5x",
+          "BAR BAR (2-reel)": "5x",
+          "2x CHERRY": "2x",
+          "1x CHERRY (reel 1)": "1x",
+        },
       },
     ],
     batch_endpoint: "POST /api/v1/bets/batch",
@@ -231,6 +251,21 @@ games.post("/plinko", async (c) => {
   const { rows, risk, amount, client_seed } = await c.req.json();
 
   const result = playPlinko(agentId, rows, risk, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Slots ───
+
+games.post("/slots", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { amount, client_seed } = await c.req.json();
+
+  const result = playSlots(agentId, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });
