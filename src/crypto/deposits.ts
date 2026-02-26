@@ -33,12 +33,11 @@ async function pollDeposits(): Promise<void> {
 
         if (balance < MIN_DEPOSIT_USD) continue;
 
-        // Check if we already recorded this (avoid double-crediting)
-        // We check by address — if there's a pending or credited deposit for this address
-        // with the same approximate amount in the last 5 minutes, skip it
-        // Check for duplicate: same address, same amount, within last 5 minutes
-        const fiveMinAgo = Math.floor(Date.now() / 1000) - 300;
-        const recentDeposit = db
+        // Check if we already credited this address for the current balance.
+        // We look for any credited deposit for this agent+chain with the same
+        // approximate amount, regardless of age — to prevent re-crediting when
+        // the treasury sweep fails and USDC remains on the deposit address.
+        const existingCreditedDeposit = db
           .select()
           .from(schema.deposits)
           .where(
@@ -49,13 +48,9 @@ async function pollDeposits(): Promise<void> {
             )
           )
           .all()
-          .find(
-            (d) =>
-              Math.abs(d.amountUsd - balance) < 0.01 &&
-              d.createdAt > fiveMinAgo
-          );
+          .find((d) => Math.abs(d.amountUsd - balance) < 0.01);
 
-        if (recentDeposit) continue;
+        if (existingCreditedDeposit) continue;
 
         const depositId = `dep_${randomUUID().slice(0, 12)}`;
         const amountUsd = Math.round(balance * 100) / 100; // USDC is already USD
@@ -103,8 +98,10 @@ async function pollDeposits(): Promise<void> {
           });
           console.log(`[deposit-monitor] Sweep requested for ${addr.address} → treasury`);
         } catch (sweepErr) {
-          // Non-fatal — funds are safe in deposit address, can sweep later
-          console.error(`[deposit-monitor] Sweep failed for ${addr.address}:`, sweepErr);
+          // Non-fatal — funds are safe in deposit address, can sweep later.
+          // IMPORTANT: Until sweep succeeds the deposit record (status="credited") will
+          // prevent re-crediting on subsequent polls. Manual sweep required if this persists.
+          console.error(`[deposit-monitor] SWEEP FAILED for ${addr.address} — manual sweep required: ${(sweepErr as Error).message}`);
         }
       } catch (addrErr) {
         // Log and continue to next address

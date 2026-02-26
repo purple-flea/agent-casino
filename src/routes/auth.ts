@@ -32,11 +32,15 @@ auth.post("/register", async (c) => {
     .get();
   const depositIndex = (maxIndex?.max ?? -1) + 1;
 
-  // Look up referrer by their referral code
+  // Look up referrer by their referral code.
+  // Prevent referral chain gaming: an agent who was themselves referred cannot
+  // act as a referrer (depth limit of 1 prevents circular self-referral schemes).
   let referrerId: string | null = null;
   if (referralCode) {
     const referrer = db.select().from(schema.agents).where(eq(schema.agents.referralCode, referralCode)).get();
-    if (referrer) referrerId = referrer.id;
+    if (referrer && referrer.referredBy === null) {
+      referrerId = referrer.id;
+    }
   }
 
   db.insert(schema.agents).values({
@@ -355,7 +359,8 @@ auth.post("/withdraw", async (c) => {
     });
   } catch (err) {
     // On-chain send failed — mark as failed and refund
-    console.error(`[withdraw] On-chain send failed for ${withdrawalId}:`, err);
+    // Log only the message, not the full error object (may contain sensitive provider data)
+    console.error(`[withdraw] On-chain send failed for ${withdrawalId}: ${(err as Error).message}`);
 
     db.update(schema.withdrawals)
       .set({ status: "failed" })
