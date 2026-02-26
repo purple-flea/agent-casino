@@ -301,11 +301,55 @@ api.get("/public-stats", (c) => {
   c.header("Cache-Control", "public, max-age=60");
   const agentResult = db.select({ count: sql<number>`count(*)` }).from(agents).get();
   const betResult = db.select({ count: sql<number>`count(*)` }).from(bets).get();
+  const winResult = db.select({ count: sql<number>`count(*)` }).from(bets).where(eq(bets.won, true)).get();
+  const volumeResult = db.select({ total: sql<number>`COALESCE(SUM(amount), 0)` }).from(bets).get();
   return c.json({
     service: "agent-casino",
     registered_agents: agentResult?.count ?? 0,
     total_bets: betResult?.count ?? 0,
+    total_wins: winResult?.count ?? 0,
+    total_volume_usd: Math.round((volumeResult?.total ?? 0) * 100) / 100,
+    house_win_rate_pct: betResult?.count
+      ? Math.round((1 - (winResult?.count ?? 0) / betResult.count) * 10000) / 100
+      : null,
     timestamp: new Date().toISOString(),
+  });
+});
+
+// ─── Per-game analytics (no auth) — useful for agents choosing games ───
+api.get("/game-stats", (c) => {
+  c.header("Cache-Control", "public, max-age=300");
+
+  const gameStats = db
+    .select({
+      game: bets.game,
+      totalBets: sql<number>`count(*)`,
+      totalWagered: sql<number>`COALESCE(SUM(amount), 0)`,
+      totalWon: sql<number>`COALESCE(SUM(amount_won), 0)`,
+      wins: sql<number>`SUM(CASE WHEN won = 1 THEN 1 ELSE 0 END)`,
+      biggestWin: sql<number>`MAX(amount_won)`,
+    })
+    .from(bets)
+    .groupBy(bets.game)
+    .all();
+
+  return c.json({
+    games: gameStats.map((g) => ({
+      game: g.game,
+      total_bets: g.totalBets,
+      total_wagered: Math.round(g.totalWagered * 100) / 100,
+      player_win_rate_pct: g.totalBets > 0
+        ? Math.round((g.wins / g.totalBets) * 10000) / 100
+        : 0,
+      biggest_win: Math.round(g.biggestWin * 100) / 100,
+      house_edge_realized_pct: g.totalWagered > 0
+        ? Math.round((1 - g.totalWon / g.totalWagered) * 10000) / 100
+        : null,
+    })).sort((a, b) => b.total_bets - a.total_bets),
+    note: "House edge is provably fair 0.5% per game. Variance means short-term realized edge differs.",
+    play: "POST /api/v1/games/{game}",
+    register: "POST /api/v1/auth/register",
+    updated_at: new Date().toISOString(),
   });
 });
 
