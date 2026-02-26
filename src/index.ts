@@ -6,7 +6,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 
 import { runMigrations } from "./db/migrate.js";
 import { db } from "./db/index.js";
-import { agents } from "./db/schema.js";
+import { agents, bets } from "./db/schema.js";
 import { sql } from "drizzle-orm";
 import { authMiddleware } from "./middleware/auth.js";
 import { auth } from "./routes/auth.js";
@@ -168,6 +168,18 @@ api.route("/fairness", fairness);
 api.route("/stats", stats);
 api.route("/tournaments", tournaments);
 api.route("/challenges", challenges);
+
+// ─── Public stats (no auth) ───
+api.get("/public-stats", (c) => {
+  const agentResult = db.select({ count: sql<number>`count(*)` }).from(agents).get();
+  const betResult = db.select({ count: sql<number>`count(*)` }).from(bets).get();
+  return c.json({
+    service: "agent-casino",
+    registered_agents: agentResult?.count ?? 0,
+    total_bets: betResult?.count ?? 0,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ─── Gossip (no auth) ───
 api.get("/gossip", (c) => {
