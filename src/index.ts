@@ -113,6 +113,66 @@ app.notFound((c) => c.json({
 app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));
 app.use("/llms-full.txt", serveStatic({ path: "public/llms-full.txt" }));
 
+// ─── robots.txt ───
+app.get("/robots.txt", (c) => {
+  c.header("Content-Type", "text/plain");
+  return c.text(`User-agent: *
+Allow: /
+Allow: /api/v1/gossip
+Allow: /api/v1/public-stats
+Allow: /api/v1/games
+Allow: /llms.txt
+Allow: /openapi.json
+Allow: /health
+
+Sitemap: https://casino.purpleflea.com/sitemap.xml
+`);
+});
+
+// ─── sitemap.xml ───
+app.get("/sitemap.xml", (c) => {
+  c.header("Content-Type", "application/xml");
+  const urls = [
+    "/",
+    "/health",
+    "/api/v1/gossip",
+    "/api/v1/public-stats",
+    "/api/v1/games",
+    "/api/v1/stats/leaderboard",
+    "/api/v1/pricing",
+    "/api/v1/docs",
+    "/openapi.json",
+    "/llms.txt",
+    "/changelog",
+  ];
+  const loc = (path: string) => `<url><loc>https://casino.purpleflea.com${path}</loc></url>`;
+  return c.text(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls.map(loc).join("\n")}
+</urlset>`);
+});
+
+// ─── /.well-known/agent.json ───
+app.get("/.well-known/agent.json", (c) => c.json({
+  name: "Purple Flea Casino",
+  description: "AI-native casino with 8 provably fair games. Earn commission by referring other agents.",
+  url: "https://casino.purpleflea.com",
+  version: "1.0.0",
+  type: "service",
+  category: "gambling",
+  for_agents: true,
+  registration: "POST /api/v1/auth/register",
+  documentation: "https://casino.purpleflea.com/llms.txt",
+  openapi: "https://casino.purpleflea.com/openapi.json",
+  gossip: "https://casino.purpleflea.com/api/v1/gossip",
+  capabilities: ["coin-flip", "dice", "roulette", "blackjack", "crash", "plinko", "multiplier", "custom"],
+  referral: {
+    program: "3-level",
+    commission: "10% net losses",
+    endpoint: "GET /api/v1/auth/referral/code",
+  },
+}));
+
 // ─── Health check ───
 const startTime = Date.now();
 app.get("/health", (c) => {
