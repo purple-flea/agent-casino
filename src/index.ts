@@ -18,6 +18,7 @@ import { stats } from "./routes/stats.js";
 import { tournaments } from "./routes/tournaments.js";
 import { challenges } from "./routes/challenges.js";
 import { daily } from "./routes/daily.js";
+import { achievements } from "./routes/achievements.js";
 import { startDepositMonitor } from "./crypto/deposits.js";
 import type { AppEnv } from "./types.js";
 
@@ -297,6 +298,7 @@ api.route("/stats", stats);
 api.route("/tournaments", tournaments);
 api.route("/challenges", challenges);
 api.route("/daily", daily);
+api.route("/achievements", achievements);
 
 // ─── Public stats (no auth) ───
 api.get("/public-stats", (c) => {
