@@ -276,7 +276,11 @@ api.use("/stats/session", authMiddleware);
 api.use("/tournaments/create", authMiddleware);
 api.use("/tournaments/:id/enter", authMiddleware);
 api.use("/tournaments/:id/play", authMiddleware);
-api.use("/challenges/*", authMiddleware);
+// /challenges/open is public; all other challenge operations need auth
+// Note: we cannot use /challenges/* because that would block /challenges/open
+api.use("/challenges", authMiddleware);             // GET + POST /challenges
+api.use("/challenges/:id/accept", authMiddleware);  // POST /challenges/:id/accept
+api.use("/challenges/:id/decline", authMiddleware); // POST /challenges/:id/decline
 
 api.route("/games", games);
 api.route("/bets", betsRouter);
