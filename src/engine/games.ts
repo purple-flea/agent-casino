@@ -154,21 +154,31 @@ function settleBet(
     resultHash,
   }).run();
 
-  // ─── Referral Commission (10% of net loss on losing bets) ───
+  // ─── Referral Commission (10% of net loss, 3-level chain) ───
   if (!won) {
-    const houseProfit = amount; // agent lost full bet
+    const houseProfit = amount;
     const bettor = db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
     if (bettor?.referredBy) {
-      const commission = round2(houseProfit * 0.10);
-      if (commission >= 0.01) {
-        ledger.credit(bettor.referredBy, commission, `referral_commission:${betId}`, "casino");
-        db.update(schema.referrals)
-          .set({ totalEarned: sql`${schema.referrals.totalEarned} + ${commission}` })
-          .where(and(
-            eq(schema.referrals.referrerId, bettor.referredBy),
-            eq(schema.referrals.referredId, agentId)
-          ))
-          .run();
+      // Level multipliers: L1=100%, L2=50%, L3=25%
+      const levelMultipliers = [1.0, 0.5, 0.25];
+      let currentReferredId = agentId;
+      let currentReferrerId: string | null = bettor.referredBy;
+      for (let level = 0; level < 3 && currentReferrerId; level++) {
+        const levelCommission = round2(houseProfit * 0.10 * levelMultipliers[level]);
+        if (levelCommission >= 0.01) {
+          ledger.credit(currentReferrerId, levelCommission, `referral_commission_l${level + 1}:${betId}`, "casino");
+          db.update(schema.referrals)
+            .set({ totalEarned: sql`${schema.referrals.totalEarned} + ${levelCommission}` })
+            .where(and(
+              eq(schema.referrals.referrerId, currentReferrerId),
+              eq(schema.referrals.referredId, currentReferredId)
+            ))
+            .run();
+        }
+        // Walk up the chain
+        const nextReferrer = db.select().from(schema.agents).where(eq(schema.agents.id, currentReferrerId)).get();
+        currentReferredId = currentReferrerId;
+        currentReferrerId = nextReferrer?.referredBy ?? null;
       }
     }
   }

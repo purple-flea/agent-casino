@@ -32,13 +32,11 @@ auth.post("/register", async (c) => {
     .get();
   const depositIndex = (maxIndex?.max ?? -1) + 1;
 
-  // Look up referrer by their referral code.
-  // Prevent referral chain gaming: an agent who was themselves referred cannot
-  // act as a referrer (depth limit of 1 prevents circular self-referral schemes).
+  // Look up referrer by their referral code (3-level chains supported).
   let referrerId: string | null = null;
   if (referralCode) {
     const referrer = db.select().from(schema.agents).where(eq(schema.agents.referralCode, referralCode)).get();
-    if (referrer && referrer.referredBy === null) {
+    if (referrer) {
       referrerId = referrer.id;
     }
   }
