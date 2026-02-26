@@ -208,18 +208,20 @@ api.use("/kelly/simulate", rateLimit(5, 60_000));        // 5 simulations/min pe
 api.use("/auth/withdraw", rateLimit(5, 60_000));         // 5 withdrawals/min per IP
 
 // General authenticated endpoint limit
-api.use("/games/*", rateLimit(60, 60_000));
+api.use("/games/:game", rateLimit(60, 60_000));  // Only rate-limit actual game plays
 api.use("/bets/*", rateLimit(60, 60_000));
 
 // Auth routes (register is public, rest needs auth)
 api.route("/auth", auth);
 
-// Protected routes
-api.use("/games/*", authMiddleware);
+// Protected routes (specific paths, not wildcard so /games list stays public)
+api.use("/games/:game", authMiddleware);  // Only individual game plays need auth
 api.use("/bets/*", authMiddleware);
 api.use("/kelly/*", authMiddleware);
 api.use("/fairness/*", authMiddleware);
-api.use("/stats/*", authMiddleware);
+// Note: /stats/leaderboard is public; all other /stats/* require auth
+api.use("/stats/me", authMiddleware);
+api.use("/stats/session", authMiddleware);
 api.use("/tournaments/create", authMiddleware);
 api.use("/tournaments/:id/enter", authMiddleware);
 api.use("/tournaments/:id/play", authMiddleware);
