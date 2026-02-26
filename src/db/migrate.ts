@@ -152,3 +152,46 @@ for (const row of rows) {
   sqlite.prepare("UPDATE agents SET referral_code = ? WHERE id = ?").run(code, row.id);
 }
 if (rows.length > 0) console.log(`[migrate] Backfilled ${rows.length} referral codes`);
+
+// Tournaments + Challenges
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS tournaments (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  game TEXT NOT NULL,
+  entry_fee REAL NOT NULL,
+  prize_pool REAL NOT NULL,
+  max_agents INTEGER NOT NULL,
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'upcoming',
+  created_by TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS tournament_entries (
+  id TEXT PRIMARY KEY,
+  tournament_id TEXT NOT NULL REFERENCES tournaments(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  score REAL NOT NULL DEFAULT 0,
+  entered_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE TABLE IF NOT EXISTS challenges (
+  id TEXT PRIMARY KEY,
+  challenger_id TEXT NOT NULL REFERENCES agents(id),
+  challenged_id TEXT NOT NULL REFERENCES agents(id),
+  game TEXT NOT NULL,
+  amount REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  winner_id TEXT,
+  message TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_tournaments_status ON tournaments(status);
+CREATE INDEX IF NOT EXISTS idx_tournaments_starts ON tournaments(starts_at);
+CREATE INDEX IF NOT EXISTS idx_tent_tournament ON tournament_entries(tournament_id);
+CREATE INDEX IF NOT EXISTS idx_tent_agent ON tournament_entries(agent_id);
+CREATE INDEX IF NOT EXISTS idx_challenges_challenger ON challenges(challenger_id);
+CREATE INDEX IF NOT EXISTS idx_challenges_challenged ON challenges(challenged_id);
+CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges(status);
+`);

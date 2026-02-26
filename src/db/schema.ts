@@ -143,3 +143,52 @@ export const treasurySnapshots = sqliteTable("treasury_snapshots", {
   reserveRatio: real("reserve_ratio").notNull(),
   createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
 });
+
+// ─── Tournaments ───
+
+export const tournaments = sqliteTable("tournaments", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  game: text("game").notNull(),
+  entryFee: real("entry_fee").notNull(),
+  prizePool: real("prize_pool").notNull(),
+  maxAgents: integer("max_agents").notNull(),
+  startsAt: integer("starts_at").notNull(),
+  endsAt: integer("ends_at").notNull(),
+  status: text("status").default("upcoming").notNull(), // upcoming, active, completed, cancelled
+  createdBy: text("created_by").notNull(),
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_tournaments_status").on(table.status),
+  index("idx_tournaments_starts").on(table.startsAt),
+]);
+
+export const tournamentEntries = sqliteTable("tournament_entries", {
+  id: text("id").primaryKey(),
+  tournamentId: text("tournament_id").notNull().references(() => tournaments.id),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  score: real("score").default(0).notNull(), // total winnings during tournament
+  enteredAt: integer("entered_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_tent_tournament").on(table.tournamentId),
+  index("idx_tent_agent").on(table.agentId),
+]);
+
+// ─── Challenges ───
+
+export const challenges = sqliteTable("challenges", {
+  id: text("id").primaryKey(),
+  challengerId: text("challenger_id").notNull().references(() => agents.id),
+  challengedId: text("challenged_id").notNull().references(() => agents.id),
+  game: text("game").notNull(),
+  amount: real("amount").notNull(),
+  status: text("status").default("pending").notNull(), // pending, accepted, declined, expired
+  winnerId: text("winner_id"),
+  message: text("message"),
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+  resolvedAt: integer("resolved_at"),
+}, (table) => [
+  index("idx_challenges_challenger").on(table.challengerId),
+  index("idx_challenges_challenged").on(table.challengedId),
+  index("idx_challenges_status").on(table.status),
+]);

@@ -12,6 +12,8 @@ import { betsRouter } from "./routes/bets.js";
 import { kelly } from "./routes/kelly.js";
 import { fairness } from "./routes/fairness.js";
 import { stats } from "./routes/stats.js";
+import { tournaments } from "./routes/tournaments.js";
+import { challenges } from "./routes/challenges.js";
 import { startDepositMonitor } from "./crypto/deposits.js";
 import type { AppEnv } from "./types.js";
 
@@ -20,8 +22,44 @@ runMigrations();
 
 const app = new Hono<AppEnv>();
 
+// ─── Simple in-process rate limiter (sliding window) ───
+// buckets: Map<key, { count, windowStart }>
+const rateLimitBuckets = new Map<string, { count: number; windowStart: number }>();
+
+function rateLimit(maxRequests: number, windowMs: number) {
+  return async (c: Parameters<Parameters<typeof app.use>[1]>[0], next: () => Promise<void>) => {
+    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim()
+      || c.req.header("x-real-ip")
+      || "unknown";
+    const key = `${c.req.path}:${ip}`;
+    const now = Date.now();
+    const bucket = rateLimitBuckets.get(key);
+
+    if (!bucket || now - bucket.windowStart > windowMs) {
+      rateLimitBuckets.set(key, { count: 1, windowStart: now });
+    } else {
+      bucket.count++;
+      if (bucket.count > maxRequests) {
+        return c.json(
+          { error: "rate_limited", message: `Too many requests. Limit: ${maxRequests} per ${windowMs / 1000}s` },
+          429
+        );
+      }
+    }
+    await next();
+  };
+}
+
+// Periodically clean up stale buckets (every 5 minutes)
+setInterval(() => {
+  const cutoff = Date.now() - 120_000;
+  for (const [key, bucket] of rateLimitBuckets) {
+    if (bucket.windowStart < cutoff) rateLimitBuckets.delete(key);
+  }
+}, 300_000);
+
 // ─── Global middleware ───
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || ["*"];
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(",") || ["null"];
 app.use("*", cors({ origin: ALLOWED_ORIGINS }));
 app.use("*", logger());
 
@@ -35,6 +73,15 @@ app.get("/health", (c) => c.json({ status: "ok", service: "agent-casino", versio
 // ─── API v1 ───
 const api = new Hono<AppEnv>();
 
+// Rate limits on sensitive public endpoints
+api.use("/auth/register", rateLimit(10, 60_000));        // 10 registrations/min per IP
+api.use("/kelly/simulate", rateLimit(5, 60_000));        // 5 simulations/min per IP
+api.use("/auth/withdraw", rateLimit(5, 60_000));         // 5 withdrawals/min per IP
+
+// General authenticated endpoint limit
+api.use("/games/*", rateLimit(60, 60_000));
+api.use("/bets/*", rateLimit(60, 60_000));
+
 // Auth routes (register is public, rest needs auth)
 api.route("/auth", auth);
 
@@ -44,12 +91,18 @@ api.use("/bets/*", authMiddleware);
 api.use("/kelly/*", authMiddleware);
 api.use("/fairness/*", authMiddleware);
 api.use("/stats/*", authMiddleware);
+api.use("/tournaments/create", authMiddleware);
+api.use("/tournaments/:id/enter", authMiddleware);
+api.use("/tournaments/:id/play", authMiddleware);
+api.use("/challenges/*", authMiddleware);
 
 api.route("/games", games);
 api.route("/bets", betsRouter);
 api.route("/kelly", kelly);
 api.route("/fairness", fairness);
 api.route("/stats", stats);
+api.route("/tournaments", tournaments);
+api.route("/challenges", challenges);
 
 // ─── Pricing ───
 api.get("/pricing", (c) => c.json({
