@@ -92,6 +92,9 @@ stats.get("/session", async (c) => {
 // ─── Leaderboard ───
 
 stats.get("/leaderboard", async (c) => {
+  const game = c.req.query("game"); // optional: filter by game
+
+  // Overall top agents by net profit
   const topAgents = db
     .select({
       id: schema.agents.id,
@@ -104,14 +107,72 @@ stats.get("/leaderboard", async (c) => {
     .limit(20)
     .all();
 
-  return c.json({
-    leaderboard: topAgents.map((a, i) => ({
+  // Per-game top players if game filter is provided
+  let gameLeaderboard = null;
+  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko"];
+
+  if (game && supportedGames.includes(game)) {
+    const gameStats = db
+      .select({
+        agentId: schema.bets.agentId,
+        totalBets: count(),
+        totalWon: sql<number>`SUM(${schema.bets.amountWon})`,
+        totalWagered: sql<number>`SUM(${schema.bets.amount})`,
+        biggestWin: sql<number>`MAX(${schema.bets.amountWon})`,
+        wins: sql<number>`SUM(CASE WHEN ${schema.bets.won} = 1 THEN 1 ELSE 0 END)`,
+      })
+      .from(schema.bets)
+      .where(eq(schema.bets.game, game))
+      .groupBy(schema.bets.agentId)
+      .orderBy(desc(sql`SUM(${schema.bets.amountWon}) - SUM(${schema.bets.amount})`))
+      .limit(10)
+      .all();
+
+    gameLeaderboard = gameStats.map((g, i) => ({
       rank: i + 1,
-      agent_id: a.id.slice(0, 6) + "...", // partially anonymized
+      agent_id: g.agentId.slice(0, 6) + "...",
+      bets: g.totalBets,
+      net_profit: Math.round((g.totalWon - g.totalWagered) * 100) / 100,
+      biggest_win: Math.round(g.biggestWin * 100) / 100,
+      win_rate_pct: g.totalBets > 0 ? Math.round((g.wins / g.totalBets) * 10000) / 100 : 0,
+    }));
+  }
+
+  // Biggest single wins across all games
+  const biggestWins = db
+    .select({
+      agentId: schema.bets.agentId,
+      game: schema.bets.game,
+      amount: schema.bets.amount,
+      amountWon: schema.bets.amountWon,
+      payoutMultiplier: schema.bets.payoutMultiplier,
+      createdAt: schema.bets.createdAt,
+    })
+    .from(schema.bets)
+    .where(eq(schema.bets.won, true))
+    .orderBy(desc(schema.bets.amountWon))
+    .limit(5)
+    .all();
+
+  return c.json({
+    overall_leaderboard: topAgents.map((a, i) => ({
+      rank: i + 1,
+      agent_id: a.id.slice(0, 6) + "...",
       total_wagered: Math.round(a.totalWagered * 100) / 100,
       total_won: Math.round(a.totalWon * 100) / 100,
       net_profit: Math.round(a.netProfit * 100) / 100,
     })),
+    ...(gameLeaderboard !== null ? { game_leaderboard: { game, entries: gameLeaderboard } } : {}),
+    biggest_wins: biggestWins.map((b) => ({
+      agent_id: b.agentId.slice(0, 6) + "...",
+      game: b.game,
+      bet: Math.round(b.amount * 100) / 100,
+      won: Math.round(b.amountWon * 100) / 100,
+      multiplier: b.payoutMultiplier,
+      at: new Date(b.createdAt * 1000).toISOString(),
+    })),
+    supported_games: supportedGames,
+    filter_tip: "Add ?game=blackjack to see per-game leaderboard",
     updated_at: new Date().toISOString(),
   });
 });
