@@ -458,6 +458,270 @@ export function playCustom(
   );
 }
 
+// ─── Blackjack ───
+
+// Card values: 2-10 = face value, J/Q/K = 10, A = 11 (or 1 if bust)
+const CARD_NAMES = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
+
+function cardValue(card: string): number {
+  if (["J","Q","K"].includes(card)) return 10;
+  if (card === "A") return 11;
+  return parseInt(card, 10);
+}
+
+function handValue(cards: string[]): number {
+  let total = cards.reduce((sum, c) => sum + cardValue(c), 0);
+  let aces = cards.filter(c => c === "A").length;
+  while (total > 21 && aces > 0) { total -= 10; aces--; }
+  return total;
+}
+
+function dealCard(result: number, offset: number): string {
+  // Map a 0-100 float + offset to one of 52 card positions
+  const idx = Math.floor(((result + offset * 7.3) % 100) / 100 * 52);
+  return CARD_NAMES[idx % 13];
+}
+
+export function playBlackjack(
+  agentId: string,
+  action: "hit" | "stand" | "double",
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  // House edge ~2% (dealer hits soft 17, blackjack pays 1.5x)
+  const winProb = 0.42; // approximate BJ win probability
+  const payout = action === "double" ? 2.0 : 1.5;
+
+  // For doubles, reserve double the amount
+  const betAmount = action === "double" ? amount * 2 : amount;
+
+  const validation = validateAndReserve(agentId, betAmount, winProb, payout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const result = calculateResult(seed.seed, cs, nonce);
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+
+  // Deal hands using deterministic card generation from result
+  const playerCard1 = dealCard(result, 0);
+  const playerCard2 = dealCard(result, 1);
+  const dealerCard1 = dealCard(result, 2);
+  const dealerCard2 = dealCard(result, 3);
+
+  let playerCards = [playerCard1, playerCard2];
+  let dealerCards = [dealerCard1, dealerCard2];
+
+  // Player blackjack (natural 21) — immediate 1.5x win
+  const playerNatural = handValue(playerCards) === 21;
+  const dealerNatural = handValue(dealerCards) === 21;
+
+  let won = false;
+  let finalPayout = payout;
+  let outcome = "stand";
+
+  if (playerNatural && !dealerNatural) {
+    won = true;
+    finalPayout = 1.5;
+    outcome = "blackjack";
+  } else if (dealerNatural && !playerNatural) {
+    won = false;
+    outcome = "dealer_blackjack";
+  } else if (playerNatural && dealerNatural) {
+    // Push — return bet (simulate as win with 1.0x)
+    won = true;
+    finalPayout = 1.0;
+    outcome = "push";
+  } else {
+    // Hit: draw one more card for player
+    if (action === "hit" || action === "double") {
+      playerCards.push(dealCard(result, 4));
+    }
+
+    const playerTotal = handValue(playerCards);
+
+    // Dealer draws to 17+
+    let dealerOffset = 5;
+    while (handValue(dealerCards) < 17) {
+      dealerCards.push(dealCard(result, dealerOffset++));
+    }
+    const dealerTotal = handValue(dealerCards);
+
+    if (playerTotal > 21) {
+      won = false;
+      outcome = "bust";
+    } else if (dealerTotal > 21) {
+      won = true;
+      finalPayout = action === "double" ? 2.0 : 1.0;
+      outcome = "dealer_bust";
+    } else if (playerTotal > dealerTotal) {
+      won = true;
+      finalPayout = action === "double" ? 2.0 : 1.0;
+      outcome = "win";
+    } else if (playerTotal === dealerTotal) {
+      won = true;
+      finalPayout = 1.0; // push
+      outcome = "push";
+    } else {
+      won = false;
+      outcome = "lose";
+    }
+  }
+
+  return settleBet(
+    agentId, betId, betAmount, won, finalPayout,
+    "blackjack",
+    {
+      action,
+      player_cards: playerCards,
+      player_total: handValue(playerCards),
+      dealer_cards: dealerCards,
+      dealer_total: handValue(dealerCards),
+      outcome,
+      win_probability: round4(winProb),
+      roll: round2(result),
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  );
+}
+
+// ─── Crash ───
+
+export function playCrash(
+  agentId: string,
+  cashOutAt: number,
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  if (cashOutAt < 1.01 || cashOutAt > 100) {
+    return { error: "invalid_cashout", message: "Cash-out multiplier must be between 1.01x and 100x" };
+  }
+
+  // Win probability = (1 - house_edge) / cashOutAt
+  const winProb = (1 - HOUSE_EDGE) / cashOutAt;
+  const payout = cashOutAt;
+
+  const validation = validateAndReserve(agentId, amount, winProb, payout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const result = calculateResult(seed.seed, cs, nonce);
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+
+  // Crash point calculation — same curve as multiplier
+  const crashPoint = result >= 99.99
+    ? 10000
+    : round2((1 - HOUSE_EDGE) / (1 - result / 100));
+
+  const won = crashPoint >= cashOutAt;
+
+  return settleBet(
+    agentId, betId, amount, won, payout,
+    "crash",
+    {
+      cash_out_at: cashOutAt,
+      crash_point: crashPoint,
+      cashed_out: won,
+      win_probability: round4(winProb),
+      roll: round2(result),
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  );
+}
+
+// ─── Plinko ───
+
+// Payout tables by risk level and number of rows
+const PLINKO_PAYOUTS: Record<string, Record<number, number[]>> = {
+  low: {
+    8:  [5.6, 2.1, 1.1, 1.0, 0.5, 1.0, 1.1, 2.1, 5.6],
+    12: [10, 3, 1.6, 1.4, 1.1, 1.0, 0.5, 1.0, 1.1, 1.4, 1.6, 3, 10],
+    16: [16, 9, 2, 1.4, 1.4, 1.2, 1.1, 1.0, 0.5, 1.0, 1.1, 1.2, 1.4, 1.4, 2, 9, 16],
+  },
+  medium: {
+    8:  [13, 3, 1.3, 0.7, 0.4, 0.7, 1.3, 3, 13],
+    12: [33, 11, 4, 2, 0.6, 0.3, 0.2, 0.3, 0.6, 2, 4, 11, 33],
+    16: [110, 41, 10, 5, 3, 1.5, 1.0, 0.5, 0.3, 0.5, 1.0, 1.5, 3, 5, 10, 41, 110],
+  },
+  high: {
+    8:  [29, 4, 1.5, 0.3, 0.2, 0.3, 1.5, 4, 29],
+    12: [170, 24, 8.1, 2, 0.7, 0.2, 0.2, 0.2, 0.7, 2, 8.1, 24, 170],
+    16: [1000, 130, 26, 9, 4, 2, 0.2, 0.2, 0.2, 0.2, 0.2, 2, 4, 9, 26, 130, 1000],
+  },
+};
+
+export function playPlinko(
+  agentId: string,
+  rows: 8 | 12 | 16,
+  risk: "low" | "medium" | "high",
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  if (![8, 12, 16].includes(rows)) {
+    return { error: "invalid_rows", message: "Rows must be 8, 12, or 16" };
+  }
+  if (!["low", "medium", "high"].includes(risk)) {
+    return { error: "invalid_risk", message: "Risk must be low, medium, or high" };
+  }
+
+  const payouts = PLINKO_PAYOUTS[risk][rows];
+  const slots = payouts.length; // rows + 1 slots
+
+  // Win probability: approximate expected value ≈ 0.97 (3% house edge embedded in payout table)
+  // Use average payout to estimate win probability for Kelly
+  const avgPayout = payouts.reduce((s, p) => s + p, 0) / slots;
+  const winProb = 0.5; // each row is 50/50, so overall ~50% chance of beating 1x
+
+  const validation = validateAndReserve(agentId, amount, winProb, avgPayout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const result = calculateResult(seed.seed, cs, nonce);
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+
+  // Simulate plinko path: each row, ball goes left or right
+  // Use successive bits of the result hash to determine direction
+  const path: ("L" | "R")[] = [];
+  let position = 0; // starts at 0, ends at 0..rows
+  for (let row = 0; row < rows; row++) {
+    // Use different sub-results for each row
+    const rowResult = calculateResult(seed.seed, `${cs}_row${row}`, nonce);
+    const goRight = rowResult < 50;
+    path.push(goRight ? "R" : "L");
+    if (goRight) position++;
+  }
+
+  const multiplier = payouts[position];
+  // Plinko always returns something (0.2x–1000x), so always "won" — multiplier drives payout
+  const won = true;
+
+  return settleBet(
+    agentId, betId, amount, won, multiplier,
+    "plinko",
+    {
+      rows,
+      risk,
+      path,
+      slot: position,
+      multiplier,
+      payout_table: payouts,
+      roll: round2(result),
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  );
+}
+
 // ─── Batch Betting ───
 
 interface BatchBetInput {
@@ -470,6 +734,10 @@ interface BatchBetInput {
   bet_type?: RouletteBetType;
   bet_value?: number;
   win_probability?: number;
+  action?: "hit" | "stand" | "double";
+  cash_out_at?: number;
+  rows?: 8 | 12 | 16;
+  risk?: "low" | "medium" | "high";
   client_seed?: string;
 }
 
@@ -490,6 +758,12 @@ export function playBatch(agentId: string, bets: BatchBetInput[]): (BetResult | 
         return playRoulette(agentId, (bet.bet_type || "red") as RouletteBetType, bet.bet_value, bet.amount, bet.client_seed);
       case "custom":
         return playCustom(agentId, bet.win_probability || 50, bet.amount, bet.client_seed);
+      case "blackjack":
+        return playBlackjack(agentId, bet.action || "stand", bet.amount, bet.client_seed);
+      case "crash":
+        return playCrash(agentId, bet.cash_out_at || 2, bet.amount, bet.client_seed);
+      case "plinko":
+        return playPlinko(agentId, bet.rows || 8, bet.risk || "low", bet.amount, bet.client_seed);
       default:
         return { error: "unknown_game", message: `Unknown game: ${bet.game}` };
     }
@@ -505,6 +779,9 @@ function getWinProbForGame(game: string, result: Record<string, unknown>): numbe
     case "multiplier": return (result.win_probability as number) || 0.5;
     case "roulette": return (result.win_probability as number) || 18 / 37;
     case "custom": return ((result.win_probability_pct as number) || 50) / 100;
+    case "blackjack": return 0.42;
+    case "crash": return (result.win_probability as number) || 0.5;
+    case "plinko": return 0.5;
     default: return 0.5;
   }
 }

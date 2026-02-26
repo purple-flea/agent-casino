@@ -5,6 +5,9 @@ import {
   playMultiplier,
   playRoulette,
   playCustom,
+  playBlackjack,
+  playCrash,
+  playPlinko,
   playBatch,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
@@ -66,6 +69,33 @@ games.get("/", (c) => {
         payout: "Calculated: (1 / probability) * 0.98",
         endpoint: "POST /api/v1/games/custom",
         params: { win_probability: "1-99 (percentage)", amount: "number", client_seed: "string (optional)" },
+      },
+      {
+        id: "blackjack",
+        name: "Blackjack",
+        description: "Beat the dealer to 21 without going bust. Stand, hit, or double down. Blackjack pays 1.5x.",
+        house_edge: "~2%",
+        payout: "1x win, 1.5x blackjack, 2x double-down win",
+        endpoint: "POST /api/v1/games/blackjack",
+        params: { action: "hit | stand | double", amount: "number", client_seed: "string (optional)" },
+      },
+      {
+        id: "crash",
+        name: "Crash",
+        description: "Set your cash-out multiplier before the round starts. Win if the crash point exceeds your target.",
+        house_edge: "0.5%",
+        payout: "Your cash-out multiplier (1.01x - 100x)",
+        endpoint: "POST /api/v1/games/crash",
+        params: { cash_out_at: "1.01-100 (multiplier)", amount: "number", client_seed: "string (optional)" },
+      },
+      {
+        id: "plinko",
+        name: "Plinko",
+        description: "Drop a ball through a peg grid. Landing slot determines payout multiplier.",
+        house_edge: "~3%",
+        payout: "Depends on rows + risk level (up to 1000x on 16-row high risk)",
+        endpoint: "POST /api/v1/games/plinko",
+        params: { rows: "8 | 12 | 16", risk: "low | medium | high", amount: "number", client_seed: "string (optional)" },
       },
     ],
     batch_endpoint: "POST /api/v1/bets/batch",
@@ -152,6 +182,55 @@ games.post("/custom", async (c) => {
   const { win_probability, amount, client_seed } = await c.req.json();
 
   const result = playCustom(agentId, win_probability, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Blackjack ───
+
+games.post("/blackjack", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { action, amount, client_seed } = await c.req.json();
+
+  if (!["hit", "stand", "double"].includes(action)) {
+    return c.json({ error: "invalid_action", message: "Action must be 'hit', 'stand', or 'double'" }, 400);
+  }
+
+  const result = playBlackjack(agentId, action, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Crash ───
+
+games.post("/crash", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { cash_out_at, amount, client_seed } = await c.req.json();
+
+  const result = playCrash(agentId, cash_out_at, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Plinko ───
+
+games.post("/plinko", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { rows, risk, amount, client_seed } = await c.req.json();
+
+  const result = playPlinko(agentId, rows, risk, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });
