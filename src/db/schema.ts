@@ -134,6 +134,18 @@ export const referrals = sqliteTable("referrals", {
   primaryKey({ columns: [table.referrerId, table.referredId] }),
 ]);
 
+// ─── Daily Bonuses ───
+
+export const dailyBonuses = sqliteTable("daily_bonuses", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  amount: real("amount").notNull(),
+  streakDay: integer("streak_day").notNull(), // 1, 2, 3, ... resets on missed day
+  claimedAt: integer("claimed_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+}, (table) => [
+  index("idx_daily_agent").on(table.agentId),
+]);
+
 // ─── Treasury Snapshots ───
 
 export const treasurySnapshots = sqliteTable("treasury_snapshots", {

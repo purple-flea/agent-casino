@@ -195,3 +195,15 @@ CREATE INDEX IF NOT EXISTS idx_challenges_challenger ON challenges(challenger_id
 CREATE INDEX IF NOT EXISTS idx_challenges_challenged ON challenges(challenged_id);
 CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges(status);
 `);
+
+// Daily bonuses
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS daily_bonuses (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  amount REAL NOT NULL,
+  streak_day INTEGER NOT NULL,
+  claimed_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_daily_agent ON daily_bonuses(agent_id);
+`);
