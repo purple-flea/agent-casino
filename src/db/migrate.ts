@@ -207,3 +207,21 @@ CREATE TABLE IF NOT EXISTS daily_bonuses (
 );
 CREATE INDEX IF NOT EXISTS idx_daily_agent ON daily_bonuses(agent_id);
 `);
+
+// First deposit bonuses
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS deposit_bonuses (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  deposit_id TEXT NOT NULL,
+  deposit_amount REAL NOT NULL,
+  bonus_amount REAL NOT NULL,
+  wagering_required REAL NOT NULL,
+  wagered_so_far REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  completed_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deposit_bonuses_agent ON deposit_bonuses(agent_id);
+CREATE INDEX IF NOT EXISTS idx_deposit_bonuses_status ON deposit_bonuses(status);
+`);

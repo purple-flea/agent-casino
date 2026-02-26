@@ -135,6 +135,29 @@ function settleBet(
     .where(eq(schema.agents.id, agentId))
     .run();
 
+  // Track wagering progress toward first-deposit bonus completion
+  const activeBonus = db.select()
+    .from(schema.depositBonuses)
+    .where(and(
+      eq(schema.depositBonuses.agentId, agentId),
+      eq(schema.depositBonuses.status, "active"),
+    ))
+    .get();
+  if (activeBonus) {
+    const newWagered = Math.round((activeBonus.wageredSoFar + amount) * 100) / 100;
+    const completed = newWagered >= activeBonus.wageringRequired;
+    db.update(schema.depositBonuses)
+      .set({
+        wageredSoFar: newWagered,
+        ...(completed ? { status: "completed", completedAt: Math.floor(Date.now() / 1000) } : {}),
+      })
+      .where(eq(schema.depositBonuses.id, activeBonus.id))
+      .run();
+    if (completed) {
+      console.log(`[deposit-bonus] Agent ${agentId} completed wagering requirement — bonus unlocked`);
+    }
+  }
+
   const newBalance = ledger.getBalance(agentId);
 
   // Record bet

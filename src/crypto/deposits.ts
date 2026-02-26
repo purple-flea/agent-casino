@@ -4,6 +4,60 @@ import { eq, sql, and } from "drizzle-orm";
 import { ledger } from "../wallet/ledger.js";
 import { getUsdcBalance, TREASURY_ADDRESS } from "./chain.js";
 
+// ─── First-deposit bonus constants ───
+const FIRST_DEPOSIT_BONUS_RATE = 1.0;  // 100% match
+const FIRST_DEPOSIT_BONUS_CAP = 25.0;  // max $25 bonus
+const WAGERING_MULTIPLIER = 10;         // must wager 10x bonus before withdrawal
+
+function maybeGrantFirstDepositBonus(agentId: string, depositId: string, depositAmountUsd: number): void {
+  // Only for genuinely first deposits: totalDeposited was 0 before this credit
+  const agent = db.select({ totalDeposited: schema.agents.totalDeposited })
+    .from(schema.agents)
+    .where(eq(schema.agents.id, agentId))
+    .get();
+
+  // totalDeposited has already been incremented by this point — so first deposit means it equals depositAmountUsd
+  if (!agent || agent.totalDeposited > depositAmountUsd + 0.01) return;
+
+  // Check no bonus has been granted yet (unique index on agent_id prevents double-grant)
+  const existing = (db as any).run
+    ? null
+    : null; // will rely on UNIQUE index constraint
+
+  const bonusAmount = Math.min(
+    Math.round(depositAmountUsd * FIRST_DEPOSIT_BONUS_RATE * 100) / 100,
+    FIRST_DEPOSIT_BONUS_CAP
+  );
+
+  if (bonusAmount < 0.01) return;
+
+  const bonusId = `bonus_${randomUUID().slice(0, 12)}`;
+  const wageringRequired = Math.round(bonusAmount * WAGERING_MULTIPLIER * 100) / 100;
+
+  try {
+    db.insert(schema.depositBonuses).values({
+      id: bonusId,
+      agentId,
+      depositId,
+      depositAmount: depositAmountUsd,
+      bonusAmount,
+      wageringRequired,
+      wageredSoFar: 0,
+      status: "active",
+    }).run();
+
+    // Credit bonus to balance
+    ledger.credit(agentId, bonusAmount, `first_deposit_bonus:${bonusId}`, "casino", bonusId);
+
+    console.log(`[deposit-bonus] Granted $${bonusAmount} first-deposit bonus to ${agentId} (wagering: $${wageringRequired})`);
+  } catch (err: any) {
+    // UNIQUE constraint violation = bonus already claimed, ignore
+    if (!err.message?.includes("UNIQUE")) {
+      console.error(`[deposit-bonus] Error granting bonus to ${agentId}:`, err.message);
+    }
+  }
+}
+
 const WALLET_SERVICE_URL = process.env.WALLET_SERVICE_URL || "http://localhost:3002";
 const WALLET_SERVICE_KEY = process.env.WALLET_SERVICE_KEY;
 if (!WALLET_SERVICE_KEY) console.warn("[WARN] WALLET_SERVICE_KEY not set — deposit sweeps will fail");
@@ -78,6 +132,9 @@ async function pollDeposits(): Promise<void> {
           .set({ totalDeposited: sql`${schema.agents.totalDeposited} + ${amountUsd}` })
           .where(eq(schema.agents.id, addr.agentId))
           .run();
+
+        // First-deposit bonus (after totalDeposited is updated so we can check it)
+        maybeGrantFirstDepositBonus(addr.agentId, depositId, amountUsd);
 
         console.log(`[deposit-monitor] Credited $${amountUsd} USDC to ${addr.agentId} from ${addr.address}`);
 

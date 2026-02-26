@@ -204,3 +204,21 @@ export const challenges = sqliteTable("challenges", {
   index("idx_challenges_challenged").on(table.challengedId),
   index("idx_challenges_status").on(table.status),
 ]);
+
+// ─── First Deposit Bonuses ───
+
+export const depositBonuses = sqliteTable("deposit_bonuses", {
+  id: text("id").primaryKey(),
+  agentId: text("agent_id").notNull().references(() => agents.id),
+  depositId: text("deposit_id").notNull(),
+  depositAmount: real("deposit_amount").notNull(),
+  bonusAmount: real("bonus_amount").notNull(),
+  wageringRequired: real("wagering_required").notNull(),
+  wageredSoFar: real("wagered_so_far").default(0).notNull(),
+  status: text("status").default("active").notNull(), // active, completed, expired
+  createdAt: integer("created_at").$defaultFn(() => Math.floor(Date.now() / 1000)).notNull(),
+  completedAt: integer("completed_at"),
+}, (table) => [
+  index("idx_deposit_bonuses_agent").on(table.agentId),
+  index("idx_deposit_bonuses_status").on(table.status),
+]);

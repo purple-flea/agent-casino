@@ -401,6 +401,68 @@ auth.get("/deposits", async (c) => {
   return c.json({ deposits: rows });
 });
 
+// ─── First Deposit Bonus Status ───
+
+auth.get("/deposit-bonus", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+
+  const bonus = db.select()
+    .from(schema.depositBonuses)
+    .where(eq(schema.depositBonuses.agentId, agentId))
+    .get();
+
+  const hasMadeDeposit = agent.totalDeposited > 0;
+
+  if (!bonus && !hasMadeDeposit) {
+    return c.json({
+      status: "available",
+      message: "Make your first deposit to claim a 100% match bonus up to $25",
+      bonus_offer: {
+        match_rate: "100%",
+        max_bonus: 25,
+        example: "Deposit $25, get $25 bonus = $50 to play with",
+        wagering_requirement: "10x the bonus amount before withdrawal",
+        example_wagering: "Get $25 bonus → wager $250 across any games to unlock",
+      },
+      how_to_deposit: "POST /api/v1/auth/deposit-address to get your deposit address",
+    });
+  }
+
+  if (!bonus && hasMadeDeposit) {
+    return c.json({
+      status: "not_granted",
+      message: "Deposit detected but bonus was not applied (deposit may have been before bonus feature launched)",
+      total_deposited: Math.round(agent.totalDeposited * 100) / 100,
+    });
+  }
+
+  const progressPct = bonus!.wageringRequired > 0
+    ? Math.min(100, Math.round((bonus!.wageredSoFar / bonus!.wageringRequired) * 10000) / 100)
+    : 100;
+  const remaining = Math.max(0, Math.round((bonus!.wageringRequired - bonus!.wageredSoFar) * 100) / 100);
+
+  return c.json({
+    status: bonus!.status,
+    bonus_id: bonus!.id,
+    deposit_amount: Math.round(bonus!.depositAmount * 100) / 100,
+    bonus_amount: Math.round(bonus!.bonusAmount * 100) / 100,
+    wagering: {
+      required: Math.round(bonus!.wageringRequired * 100) / 100,
+      completed: Math.round(bonus!.wageredSoFar * 100) / 100,
+      remaining,
+      progress_pct: progressPct,
+    },
+    message: bonus!.status === "completed"
+      ? "Wagering requirement met! Bonus funds are fully yours — no withdrawal restrictions."
+      : bonus!.status === "active"
+      ? `Wager $${remaining} more across any games to complete your wagering requirement.`
+      : "Bonus expired",
+    claimed_at: new Date(bonus!.createdAt * 1000).toISOString(),
+    ...(bonus!.completedAt ? { completed_at: new Date(bonus!.completedAt * 1000).toISOString() } : {}),
+  });
+});
+
 // ─── Ledger History ───
 
 auth.get("/ledger", async (c) => {
