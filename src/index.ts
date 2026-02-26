@@ -112,6 +112,10 @@ app.notFound((c) => c.json({
 // ─── Static files (llms.txt, llms-full.txt) ───
 app.use("/llms.txt", serveStatic({ path: "public/llms.txt" }));
 app.use("/llms-full.txt", serveStatic({ path: "public/llms-full.txt" }));
+app.use("/.well-known/llms.txt", serveStatic({ path: "public/llms.txt" }));
+
+// ─── favicon.ico — 204 to suppress 404 log noise ───
+app.get("/favicon.ico", (c) => new Response(null, { status: 204 }));
 
 // ─── robots.txt ───
 app.get("/robots.txt", (c) => {
