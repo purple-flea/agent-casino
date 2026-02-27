@@ -64,8 +64,6 @@ function maybeGrantFirstDepositBonus(agentId: string, depositId: string, deposit
 const WALLET_SERVICE_URL = process.env.WALLET_SERVICE_URL || "http://localhost:3002";
 const WALLET_SERVICE_KEY = process.env.WALLET_SERVICE_KEY;
 if (!WALLET_SERVICE_KEY) console.warn("[WARN] WALLET_SERVICE_KEY not set — deposit sweeps will fail");
-const WAGYU_API_KEY = process.env.WAGYU_API_KEY || "";
-if (!WAGYU_API_KEY) console.warn("[WARN] WAGYU_API_KEY not set — Wagyu swap orders will fail");
 
 const POLL_INTERVAL_MS = 60_000;         // 60 seconds — Base USDC
 const NON_BASE_POLL_INTERVAL_MS = 90_000; // 90 seconds — non-Base chains
@@ -194,7 +192,7 @@ async function detectSolanaDeposit(address: string): Promise<number | null> {
   try {
     const res = await fetch("https://api.mainnet-beta.solana.com", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(WAGYU_API_KEY ? { "X-API-KEY": WAGYU_API_KEY } : {}) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }),
       signal: AbortSignal.timeout(10_000),
     });
@@ -295,7 +293,7 @@ async function createWagyuOrder(
 
     const res = await fetch("https://api.wagyu.xyz/v1/order", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(WAGYU_API_KEY ? { "X-API-KEY": WAGYU_API_KEY } : {}) },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000),
     });
@@ -316,7 +314,6 @@ async function createWagyuOrder(
 async function checkWagyuStatus(orderId: string): Promise<{ status: string; outputAmount?: string } | null> {
   try {
     const res = await fetch(`https://api.wagyu.xyz/v1/order/${orderId}`, {
-      headers: WAGYU_API_KEY ? { "X-API-KEY": WAGYU_API_KEY } : undefined,
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return null;
