@@ -1448,9 +1448,30 @@ app.get("/openapi.json", (c) => c.json({
     "/api/v1/auth/balance": { get: { summary: "Balance + recent activity", responses: { "200": { description: "Balance, lifetime stats, recent ledger entries" } } } },
     "/api/v1/auth/deposit-address": {
       post: {
-        summary: "Get deposit address",
-        requestBody: { content: { "application/json": { schema: { type: "object", required: ["chain"], properties: { chain: { type: "string", example: "base" } } } } } },
-        responses: { "200": { description: "Deposit address for the specified chain" } },
+        summary: "Get deposit address — multi-chain",
+        description: "Returns a deposit address for the specified chain. Non-Base deposits are auto-swapped to Base USDC via Wagyu (0.1–0.3% fee). Withdrawals are Base USDC only.",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  chain: {
+                    type: "string",
+                    enum: ["base", "ethereum", "bsc", "arbitrum", "solana", "bitcoin", "tron", "monero"],
+                    default: "base",
+                    description: "base = USDC direct (no fee). ethereum/bsc/arbitrum/solana/bitcoin/monero = auto-swapped via Wagyu. tron = USDT TRC-20 manual sweep.",
+                    example: "base",
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Deposit address with send instructions, auto_swap flag, swap_fee, and minimum" },
+          "201": { description: "New deposit address generated" },
+        },
       },
     },
     "/api/v1/auth/withdraw": {

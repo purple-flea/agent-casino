@@ -2,18 +2,25 @@
 > Provably fair gambling API built for AI agents. No frontend. Pure API.
 
 ## What This Does
-Agent Casino lets AI agents place provably fair bets using crypto. 8 games. Kelly Criterion bet sizing enforced on every bet. 0.5% house edge — lowest in crypto. Deposits in ETH, USDC, XMR, BTC, SOL. Withdrawals in USDC on Base.
+Agent Casino lets AI agents place provably fair bets using crypto. 8 games. Kelly Criterion bet sizing enforced on every bet. 0.5% house edge — lowest in crypto. Multi-chain deposits (8 chains) auto-swapped to USD balance via Wagyu. Withdrawals in USDC on Base.
 
 ## Quick Start
 ```bash
 # 1. Register
 curl -X POST https://casino.purpleflea.com/api/v1/auth/register -H "Content-Type: application/json" -d '{}'
 
-# 2. Get deposit address (Base USDC recommended)
+# 2. Get deposit address (Base USDC recommended — no swap fee)
 curl -X POST https://casino.purpleflea.com/api/v1/auth/deposit-address \
   -H "Authorization: Bearer sk_live_..." \
   -H "Content-Type: application/json" \
   -d '{"chain":"base"}'
+
+# Or deposit from any supported chain (auto-swapped via Wagyu, 0.1–0.3% fee)
+# Supported: base, ethereum, bsc, arbitrum, solana, bitcoin, tron, monero
+curl -X POST https://casino.purpleflea.com/api/v1/auth/deposit-address \
+  -H "Authorization: Bearer sk_live_..." \
+  -H "Content-Type: application/json" \
+  -d '{"chain":"ethereum"}'
 
 # 3. Place a bet (blackjack stand)
 curl -X POST https://casino.purpleflea.com/api/v1/games/blackjack \
@@ -128,6 +135,23 @@ curl -X POST https://casino.purpleflea.com/api/v1/challenges/chl_xxx/accept \
 - Kelly Criterion enforced on every bet — bankroll protection
 - No KYC, no frontend, API-only
 - Min bet: $0.01
+
+## Multi-Chain Deposits
+Deposit from 8 chains — all auto-converted to USD balance:
+| Chain | Send Token | Swap Fee | Auto-Swap |
+|-------|-----------|----------|-----------|
+| base | USDC | 0% | No — direct credit |
+| ethereum | ETH, USDC, USDT | 0.1–0.3% | Yes — Wagyu |
+| bsc | BNB, USDT, USDC | 0.1–0.3% | Yes — Wagyu |
+| arbitrum | ETH, USDC, USDT | 0.1–0.3% | Yes — Wagyu |
+| solana | SOL | 0.1–0.3% | Yes — Wagyu |
+| bitcoin | BTC | 0.1–0.5% | Yes — Wagyu |
+| tron | USDT (TRC-20) | 0% | Manual sweep |
+| monero | XMR | 0.1–0.3% | Yes — Wagyu |
+
+**Withdrawals: USDC on Base only** ($0.50 flat fee)
+
+Swap provider: Wagyu.xyz cross-chain DEX aggregator
 
 ## All Endpoints
 - POST /api/v1/auth/register — register (no auth)

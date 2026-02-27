@@ -124,21 +124,119 @@ auth.get("/balance", async (c) => {
   });
 });
 
+// ─── Supported chains config for deposit-address endpoint ───
+
+const SUPPORTED_CHAINS = ["base", "ethereum", "bsc", "arbitrum", "solana", "bitcoin", "tron", "monero"] as const;
+type SupportedChain = typeof SUPPORTED_CHAINS[number];
+
+interface ChainDepositInfo {
+  token: string;
+  send_token: string;
+  auto_swap: boolean;
+  swap_fee: string;
+  minimum: string;
+  note: string;
+  send_instructions: string;
+}
+
+const CHAIN_INFO: Record<SupportedChain, ChainDepositInfo> = {
+  base: {
+    token: "USDC",
+    send_token: "USDC",
+    auto_swap: false,
+    swap_fee: "0%",
+    minimum: "$0.50",
+    note: "Lowest fees — direct USDC credit, no swap",
+    send_instructions: "Send USDC (ERC-20) on Base network to this address",
+  },
+  ethereum: {
+    token: "ETH or USDC/USDT",
+    send_token: "ETH, USDC, or USDT",
+    auto_swap: true,
+    swap_fee: "0.1–0.3%",
+    minimum: "$0.50 equivalent",
+    note: "Auto-swapped to Base USDC via Wagyu — ETH gas fees apply",
+    send_instructions: "Send ETH, USDC, or USDT on Ethereum mainnet to this address",
+  },
+  bsc: {
+    token: "BNB or USDT/USDC",
+    send_token: "BNB, USDT, or USDC",
+    auto_swap: true,
+    swap_fee: "0.1–0.3%",
+    minimum: "$0.50 equivalent",
+    note: "Auto-swapped to Base USDC via Wagyu",
+    send_instructions: "Send BNB, USDT (BSC), or USDC (BSC) to this address",
+  },
+  arbitrum: {
+    token: "ETH or USDC/USDT",
+    send_token: "ETH, USDC, or USDT",
+    auto_swap: true,
+    swap_fee: "0.1–0.3%",
+    minimum: "$0.50 equivalent",
+    note: "Auto-swapped to Base USDC via Wagyu — low fees",
+    send_instructions: "Send ETH, USDC, or USDT on Arbitrum One to this address",
+  },
+  solana: {
+    token: "SOL",
+    send_token: "SOL",
+    auto_swap: true,
+    swap_fee: "0.1–0.3%",
+    minimum: "$0.50 equivalent",
+    note: "Auto-swapped to Base USDC via Wagyu — manual sweep in v1",
+    send_instructions: "Send SOL to this Solana address",
+  },
+  bitcoin: {
+    token: "BTC",
+    send_token: "BTC",
+    auto_swap: true,
+    swap_fee: "0.1–0.5% + BTC mining fee",
+    minimum: "~$5 (min Wagyu swap)",
+    note: "Auto-swapped to Base USDC via Wagyu — allow 1 confirmation",
+    send_instructions: "Send BTC to this native SegWit (bech32) address",
+  },
+  tron: {
+    token: "USDT TRC-20",
+    send_token: "USDT",
+    auto_swap: false,
+    swap_fee: "0%",
+    minimum: "$0.50",
+    note: "USDT TRC-20 — manual sweep to treasury in v1",
+    send_instructions: "Send USDT (TRC-20) on the Tron network to this address",
+  },
+  monero: {
+    token: "XMR",
+    send_token: "XMR",
+    auto_swap: true,
+    swap_fee: "0.1–0.3%",
+    minimum: "$0.50 equivalent",
+    note: "Private XMR deposits — auto-swapped to Base USDC via Wagyu",
+    send_instructions: "Send XMR to this Monero primary address",
+  },
+};
+
 // ─── Deposit Address ───
 
 auth.post("/deposit-address", async (c) => {
   const agentId = c.get("agentId") as string;
   const agent = c.get("agent") as typeof schema.agents.$inferSelect;
-  const { chain } = await c.req.json();
+  const body = await c.req.json().catch(() => ({})) as { chain?: string };
+  const chain = (body.chain ?? "base") as SupportedChain;
 
-  const supportedChains = ["base", "ethereum", "bsc", "arbitrum", "optimism", "polygon", "solana", "monero", "bitcoin", "tron", "lightning"];
-  if (!supportedChains.includes(chain)) {
+  if (!SUPPORTED_CHAINS.includes(chain)) {
     return c.json({
       error: "unsupported_chain",
-      supported: supportedChains,
+      supported: SUPPORTED_CHAINS,
       suggestion: "Use 'base' for lowest fees (USDC on Base)",
+      chains: SUPPORTED_CHAINS.map(c => ({
+        chain: c,
+        token: CHAIN_INFO[c].send_token,
+        auto_swap: CHAIN_INFO[c].auto_swap,
+        swap_fee: CHAIN_INFO[c].swap_fee,
+      })),
     }, 400);
   }
+
+  const info = CHAIN_INFO[chain];
 
   // Check if address already exists
   const existing = db
@@ -152,9 +250,13 @@ auth.post("/deposit-address", async (c) => {
     return c.json({
       chain,
       address: existing.address,
-      note: "All deposits auto-converted to USD balance",
-      minimum: "$0.50 equivalent",
-      recommended: "USDC on Base for lowest fees",
+      send_token: info.send_token,
+      send_instructions: info.send_instructions,
+      auto_swap: info.auto_swap,
+      swap_fee: info.swap_fee,
+      minimum: info.minimum,
+      note: info.note,
+      withdrawals: "USDC on Base only — all deposits converted to USD balance",
     });
   }
 
@@ -185,10 +287,9 @@ auth.post("/deposit-address", async (c) => {
     }
 
     const walletData = await resp.json() as { address?: string; addresses?: Array<{chain: string; address: string}> | Record<string, string> };
-    // Wallet service may return a single address or chain-specific addresses
-    // Wallet returns addresses as array [{chain, address}] — find the right one
     const addrList = Array.isArray(walletData.addresses) ? walletData.addresses : [];
-    const evmChains = ["base", "ethereum", "bsc", "arbitrum", "optimism", "polygon"];
+    // EVM chains (base, ethereum, bsc, arbitrum) all share the same address
+    const evmChains = ["base", "ethereum", "bsc", "arbitrum"];
     const lookupChain = evmChains.includes(chain) && chain !== "ethereum" ? "ethereum" : chain;
     address = addrList.find((a: any) => a.chain === chain)?.address
            || addrList.find((a: any) => a.chain === lookupChain)?.address
@@ -199,7 +300,6 @@ auth.post("/deposit-address", async (c) => {
         error: "wallet_service_error",
         message: "Wallet service returned no address for this chain",
       }, 502);
-      return; // unreachable but satisfies TS
     }
   } catch (err) {
     console.error(`[deposit-address] Wallet service unreachable:`, err);
@@ -219,30 +319,34 @@ auth.post("/deposit-address", async (c) => {
   return c.json({
     chain,
     address,
-    note: "All deposits auto-converted to USD balance",
-    minimum: "$0.50 equivalent",
-    recommended: "USDC on Base for lowest fees",
-  });
+    send_token: info.send_token,
+    send_instructions: info.send_instructions,
+    auto_swap: info.auto_swap,
+    swap_fee: info.swap_fee,
+    minimum: info.minimum,
+    note: info.note,
+    withdrawals: "USDC on Base only — all deposits converted to USD balance",
+  }, 201);
 });
 
 // ─── Supported Chains ───
 
 auth.get("/supported-chains", async (c) => {
   return c.json({
-    deposits: [
-      { chain: "base", tokens: ["USDC", "USDT", "ETH"], recommended: true, note: "Lowest fees" },
-      { chain: "ethereum", tokens: ["USDC", "USDT", "ETH"], note: "Higher gas fees" },
-      { chain: "arbitrum", tokens: ["USDC", "USDT", "ETH"], note: "Low fees" },
-      { chain: "optimism", tokens: ["USDC", "USDT", "ETH"], note: "Low fees" },
-      { chain: "polygon", tokens: ["USDC", "USDT", "MATIC"], note: "Very low fees" },
-      { chain: "solana", tokens: ["USDC", "SOL"], note: "Fast & cheap" },
-      { chain: "monero", tokens: ["XMR"], note: "Private transactions" },
-      { chain: "bitcoin", tokens: ["BTC"], note: "1 confirmation required" },
-      { chain: "lightning", tokens: ["BTC"], note: "Instant via invoice" },
-    ],
+    deposits: SUPPORTED_CHAINS.map(chain => ({
+      chain,
+      send_token: CHAIN_INFO[chain].send_token,
+      auto_swap: CHAIN_INFO[chain].auto_swap,
+      swap_fee: CHAIN_INFO[chain].swap_fee,
+      minimum: CHAIN_INFO[chain].minimum,
+      note: CHAIN_INFO[chain].note,
+      recommended: chain === "base",
+    })),
     withdrawals: [
-      { chain: "base", token: "USDC", fee: "$0.50 flat", note: "Only Base USDC withdrawals supported" },
+      { chain: "base", token: "USDC", fee: "$0.50 flat", note: "All withdrawals sent as USDC on Base" },
     ],
+    swap_provider: "Wagyu.xyz — cross-chain swaps for all non-Base deposits",
+    how_it_works: "Deposit any supported asset → auto-swapped to Base USDC → credited to your balance",
   });
 });
 

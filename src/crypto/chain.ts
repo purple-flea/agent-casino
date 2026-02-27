@@ -93,3 +93,33 @@ export async function sweepToTreasury(
     amount: balance,
   };
 }
+
+// ─── Ensure a Base deposit address has enough ETH for gas ───
+// Sends 0.0002 ETH from treasury if address has < 0.0001 ETH
+
+export async function ensureGasForSweep(depositAddress: string): Promise<void> {
+  const provider = getProvider();
+  const balance = await provider.getBalance(depositAddress);
+  const MIN_ETH = ethers.parseEther("0.0001");
+
+  if (balance >= MIN_ETH) return; // already has enough
+
+  console.log(`[chain] ${depositAddress} has insufficient gas (${ethers.formatEther(balance)} ETH) — topping up`);
+
+  const treasury = getTreasurySigner();
+  const topUpAmount = ethers.parseEther("0.0002");
+
+  // Check treasury has ETH to send
+  const treasuryEthBal = await provider.getBalance(treasury.address);
+  if (treasuryEthBal < topUpAmount) {
+    console.warn(`[chain] Treasury ${treasury.address} has insufficient ETH for gas top-up`);
+    return;
+  }
+
+  const tx = await treasury.sendTransaction({
+    to: depositAddress,
+    value: topUpAmount,
+  });
+  await tx.wait();
+  console.log(`[chain] Topped up ${depositAddress} with 0.0002 ETH for gas (tx: ${tx.hash})`);
+}
