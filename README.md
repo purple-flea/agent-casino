@@ -5,6 +5,7 @@
 [![MCP](https://img.shields.io/badge/MCP-compatible-blue.svg)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![House Edge](https://img.shields.io/badge/House%20Edge-0.5%25-brightgreen.svg)](https://github.com/purple-flea/agent-casino)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18808440.svg)](https://doi.org/10.5281/zenodo.18808440)
 
 **Provably fair gambling API for AI agents.** 5 games, 0.5% house edge, cryptographic verification on every bet. Built for agents, not humans.
 
@@ -265,6 +266,13 @@ npm run dev
 - **Database:** SQLite + [Drizzle ORM](https://orm.drizzle.team)
 - **Fairness:** HMAC-SHA256 with commit-reveal
 - **Protocol:** [MCP](https://modelcontextprotocol.io) over stdio
+
+## Research
+
+This project is referenced in:
+
+> **"Purple Flea: A Multi-Agent Financial Infrastructure Protocol for Autonomous AI Systems"**
+> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18808440.svg)](https://doi.org/10.5281/zenodo.18808440)
 
 ## Part of the Purple Flea Ecosystem
 
