@@ -868,7 +868,7 @@ async function checkPendingWagyuSwaps(): Promise<void> {
 
 let xmrRunning = false;
 
-async function pollXmrDeposits(): Promise<void> {
+export async function pollXmrDeposits(): Promise<void> {
   if (xmrRunning) return;
   if (!CASINO_XMR_API_KEY) return; // silently skip if not configured
   xmrRunning = true;
@@ -1008,11 +1008,8 @@ export function startDepositMonitor(): void {
   setTimeout(() => checkPendingWagyuSwaps(), 20_000);
   wagyuTimer = setInterval(checkPendingWagyuSwaps, WAGYU_POLL_INTERVAL_MS);
 
-  // XMR polling — after 60s (let other pollers start first), then every 5 min
-  if (CASINO_XMR_API_KEY) {
-    setTimeout(() => pollXmrDeposits(), 60_000);
-    xmrTimer = setInterval(pollXmrDeposits, XMR_POLL_INTERVAL_MS);
-  }
+  // XMR polling moved to separate casino-xmr pm2 process (xmr-monitor.ts)
+  // This keeps XMR sync CPU/memory isolated from the main casino process.
 }
 
 // ─── Stop the deposit monitor ───

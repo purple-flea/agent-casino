@@ -59,6 +59,15 @@ auth.post("/register", async (c) => {
     }).run();
   }
 
+  // Auto-claim faucet ($1 free credits) for every new agent — fire and forget
+  const FAUCET_URL = process.env.FAUCET_URL || "http://localhost:3006";
+  fetch(`${FAUCET_URL}/faucet/claim`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ agent_casino_id: agentId }),
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => { /* silent — faucet errors never block registration */ });
+
   return c.json({
     agent_id: agentId,
     api_key: apiKey,
