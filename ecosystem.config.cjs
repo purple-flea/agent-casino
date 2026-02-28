@@ -1,8 +1,7 @@
 module.exports = {
   apps: [{
     name: "casino",
-    script: "./node_modules/.bin/tsx",
-    args: "src/index.ts",
+    script: "dist/index.js",
     cwd: "/home/dev/casino",
     env: {
       PORT: "3000",
