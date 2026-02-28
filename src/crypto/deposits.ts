@@ -4,6 +4,7 @@ import { db, schema } from "../db/index.js";
 import { eq, sql, and, isNotNull } from "drizzle-orm";
 import { ledger } from "../wallet/ledger.js";
 import { getUsdcBalance, TREASURY_ADDRESS, ensureGasForSweep } from "./chain.js";
+import { deriveXmrDepositKeys } from "./xmr.js";
 
 // ─── First-deposit bonus constants ───
 const FIRST_DEPOSIT_BONUS_RATE = 1.0;  // 100% match
@@ -67,9 +68,18 @@ if (!WALLET_SERVICE_KEY) console.warn("[WARN] WALLET_SERVICE_KEY not set — dep
 const WAGYU_API_KEY = process.env.WAGYU_API_KEY || "";
 if (!WAGYU_API_KEY) console.warn("[WARN] WAGYU_API_KEY not set — Wagyu swap orders will fail");
 
+// ─── Public-wallet service (for XMR balance checks + sweeps via monero-ts) ───
+
+const PUBLIC_WALLET_URL = process.env.PUBLIC_WALLET_URL || "http://localhost:3005";
+const CASINO_XMR_API_KEY = process.env.CASINO_XMR_API_KEY || "";
+if (!CASINO_XMR_API_KEY) console.warn("[WARN] CASINO_XMR_API_KEY not set — XMR deposit detection will fail");
+
+const TREASURY_PRIVATE_KEY = process.env.TREASURY_PRIVATE_KEY || "";
+
 const POLL_INTERVAL_MS = 60_000;         // 60 seconds — Base USDC
-const NON_BASE_POLL_INTERVAL_MS = 90_000; // 90 seconds — non-Base chains
+const NON_BASE_POLL_INTERVAL_MS = 90_000; // 90 seconds — non-Base chains (EVM/BTC/SOL/Tron)
 const WAGYU_POLL_INTERVAL_MS = 30_000;   // 30 seconds — pending Wagyu swaps
+const XMR_POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — XMR (sync takes ~10s per address)
 const MIN_DEPOSIT_USD = 0.50;
 
 // ─── Supported non-Base deposit chains ───
@@ -240,7 +250,7 @@ async function getNativeTokenPrice(symbol: string): Promise<number> {
   const cached = _priceCache[symbol];
   if (cached && Date.now() - cached.fetchedAt < PRICE_CACHE_TTL) return cached.price;
 
-  const coinMap: Record<string, string> = { ETH: "ethereum", BNB: "binancecoin", SOL: "solana", BTC: "bitcoin" };
+  const coinMap: Record<string, string> = { ETH: "ethereum", BNB: "binancecoin", SOL: "solana", BTC: "bitcoin", XMR: "monero" };
   const coinId = coinMap[symbol];
   if (!coinId) return 0;
 
@@ -362,6 +372,81 @@ async function sweepViaWalletService(
   } catch (err) {
     console.error(`[sweep] Wallet service unreachable:`, (err as Error).message);
     return false;
+  }
+}
+
+// ─── XMR deposit detection via public-wallet (monero-ts WASM) ───
+
+/**
+ * Check XMR balance for a deposit address using the public-wallet service.
+ * The public-wallet has monero-ts WASM and handles the view-key scanning.
+ * Returns piconero balance (1 XMR = 1e12 piconero), or null on error.
+ */
+async function detectXmrBalance(address: string, viewKey: string): Promise<bigint | null> {
+  if (!CASINO_XMR_API_KEY) return null;
+  try {
+    const res = await fetch(
+      `${PUBLIC_WALLET_URL}/v1/wallet/balance/${encodeURIComponent(address)}?chain=monero&view_key=${viewKey}`,
+      {
+        headers: { "Authorization": `Bearer ${CASINO_XMR_API_KEY}` },
+        signal: AbortSignal.timeout(35_000), // XMR sync takes ~10s on first call
+      }
+    );
+    if (!res.ok) {
+      const err = await res.text().catch(() => "(unreadable)");
+      console.error(`[xmr-detect] Balance check failed (${res.status}): ${err.slice(0, 200)}`);
+      return null;
+    }
+    const data = await res.json() as any;
+    const piconero = data.balance?.native?.piconero;
+    if (!piconero) return 0n;
+    return BigInt(piconero);
+  } catch (err) {
+    console.error(`[xmr-detect] Error checking ${address.slice(0, 20)}...:`, (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Sweep XMR from a deposit address to a Wagyu deposit address.
+ * Uses the public-wallet service's /v1/wallet/send endpoint (monero-ts WASM).
+ * Returns tx hash on success, null on failure.
+ */
+async function sweepXmrToWagyu(
+  fromAddress: string,
+  viewKey: string,
+  spendKey: string,
+  toAddress: string,
+  amountXmr: string,
+): Promise<string | null> {
+  if (!CASINO_XMR_API_KEY) return null;
+  try {
+    const res = await fetch(`${PUBLIC_WALLET_URL}/v1/wallet/send`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${CASINO_XMR_API_KEY}`,
+      },
+      body: JSON.stringify({
+        chain: "monero",
+        from: fromAddress,
+        to: toAddress,
+        amount: amountXmr,
+        view_key: viewKey,
+        spend_key: spendKey,
+      }),
+      signal: AbortSignal.timeout(90_000), // XMR sends sync wallet first (~10s) then broadcast
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => "(unreadable)");
+      console.error(`[xmr-sweep] Send failed (${res.status}): ${err.slice(0, 200)}`);
+      return null;
+    }
+    const data = await res.json() as any;
+    return data.tx_hash ?? null;
+  } catch (err) {
+    console.error(`[xmr-sweep] Error:`, (err as Error).message);
+    return null;
   }
 }
 
@@ -705,7 +790,8 @@ async function detectAndQueueDeposit(chain: NonBaseChain, agentId: string, addre
     return;
   }
 
-  // ── Monero — handled via separate XMR sync; skip polling here ──
+  // ── Monero — handled by pollXmrDeposits (separate timer, slow ~10s sync)
+  // Not processed here to avoid blocking the non-base polling loop.
 }
 
 // ─── Poll pending Wagyu orders and credit on completion ───
@@ -778,17 +864,137 @@ async function checkPendingWagyuSwaps(): Promise<void> {
   }
 }
 
+// ─── XMR deposit polling (separate timer — monero-ts sync takes ~10s per address) ───
+
+let xmrRunning = false;
+
+async function pollXmrDeposits(): Promise<void> {
+  if (xmrRunning) return;
+  if (!CASINO_XMR_API_KEY) return; // silently skip if not configured
+  xmrRunning = true;
+
+  try {
+    const addresses = db
+      .select()
+      .from(schema.depositAddresses)
+      .where(eq(schema.depositAddresses.chain, "monero"))
+      .all();
+
+    for (const addr of addresses) {
+      try {
+        await detectAndQueueXmrDeposit(addr.agentId, addr.address);
+      } catch (err) {
+        console.error(`[xmr-poll] Error for ${addr.agentId}:`, (err as Error).message);
+      }
+    }
+  } catch (err) {
+    console.error("[xmr-poll] Poll error:", err);
+  } finally {
+    xmrRunning = false;
+  }
+}
+
+async function detectAndQueueXmrDeposit(agentId: string, storedAddress: string): Promise<void> {
+  if (!TREASURY_PRIVATE_KEY) {
+    console.warn("[xmr-poll] TREASURY_PRIVATE_KEY not set — cannot derive XMR keys");
+    return;
+  }
+
+  const { address: derivedAddress, privateViewKey, privateSpendKey } = deriveXmrDepositKeys(agentId, TREASURY_PRIVATE_KEY);
+
+  // Fix invalid/legacy addresses generated by the old wallet service derivation
+  if (storedAddress !== derivedAddress) {
+    db.update(schema.depositAddresses)
+      .set({ address: derivedAddress })
+      .where(and(
+        eq(schema.depositAddresses.agentId, agentId),
+        eq(schema.depositAddresses.chain, "monero"),
+      ))
+      .run();
+    console.log(`[xmr-poll] Fixed XMR deposit address for ${agentId} → ${derivedAddress.slice(0, 20)}...`);
+    return; // Check balance next poll cycle with corrected address
+  }
+
+  // Check XMR balance via public-wallet (uses monero-ts WASM + public node)
+  const piconero = await detectXmrBalance(derivedAddress, privateViewKey);
+  if (piconero === null || piconero === 0n) return;
+
+  const xmrAmount = Number(piconero) / 1e12;
+  const priceUsd = await getNativeTokenPrice("XMR");
+  const amountUsd = xmrAmount * (priceUsd || 150); // fallback $150 if CoinGecko down
+  if (amountUsd < MIN_DEPOSIT_USD) return;
+
+  // Skip if already processing or credited a deposit of this size
+  const existing = db
+    .select()
+    .from(schema.deposits)
+    .where(and(eq(schema.deposits.agentId, agentId), eq(schema.deposits.chain, "monero")))
+    .all()
+    .find(d => d.status !== "failed" && Math.abs(d.amountRaw - xmrAmount) < xmrAmount * 0.01);
+  if (existing) return;
+
+  console.log(`[xmr-poll] XMR deposit detected: ${xmrAmount.toFixed(6)} XMR (~$${amountUsd.toFixed(2)}) for ${agentId}`);
+
+  // Create Wagyu swap order: XMR → Base USDC → Treasury
+  const order = await createWagyuOrder("monero", "XMR", piconero);
+  if (!order) {
+    console.error(`[xmr-poll] Wagyu order failed for ${agentId} — will retry next cycle`);
+    return;
+  }
+
+  const depositId = `dep_${randomUUID().slice(0, 12)}`;
+  const expectedUsd = Number(order.expectedOutput) / 1e6;
+  const swapFee = Math.max(0, Math.round((amountUsd - expectedUsd) * 100) / 100);
+
+  db.insert(schema.deposits).values({
+    id: depositId,
+    agentId,
+    chain: "monero",
+    token: "XMR",
+    amountRaw: xmrAmount,
+    amountUsd: Math.round(expectedUsd * 100) / 100,
+    swapFee,
+    txHash: `xmr_sweep_pending_${Date.now()}`,
+    wagyuTx: order.orderId,
+    status: "pending",
+    confirmations: 0,
+  }).run();
+
+  console.log(`[xmr-poll] Wagyu order ${order.orderId} created — sweeping ${xmrAmount.toFixed(6)} XMR to ${order.depositAddress.slice(0, 20)}...`);
+
+  // Sweep XMR from deposit address to Wagyu's deposit address
+  const txHash = await sweepXmrToWagyu(
+    derivedAddress,
+    privateViewKey,
+    privateSpendKey,
+    order.depositAddress,
+    xmrAmount.toFixed(12),
+  );
+
+  if (txHash) {
+    db.update(schema.deposits)
+      .set({ txHash })
+      .where(eq(schema.deposits.id, depositId))
+      .run();
+    console.log(`[xmr-poll] XMR swept to Wagyu: ${txHash}`);
+  } else {
+    console.error(`[xmr-poll] XMR sweep failed for deposit ${depositId} — Wagyu order ${order.orderId} may expire`);
+  }
+}
+
 // ─── Timer handles ───
 
 let baseTimer: ReturnType<typeof setInterval> | null = null;
 let nonBaseTimer: ReturnType<typeof setInterval> | null = null;
 let wagyuTimer: ReturnType<typeof setInterval> | null = null;
+let xmrTimer: ReturnType<typeof setInterval> | null = null;
 
 // ─── Start the deposit monitor ───
 
 export function startDepositMonitor(): void {
   console.log(`[deposit-monitor] Starting — polling Base USDC every ${POLL_INTERVAL_MS / 1000}s`);
   console.log(`[deposit-monitor] Non-Base chains: ${SUPPORTED_DEPOSIT_CHAINS.join(", ")} — polling every ${NON_BASE_POLL_INTERVAL_MS / 1000}s`);
+  console.log(`[deposit-monitor] XMR polling every ${XMR_POLL_INTERVAL_MS / 1000}s — ${CASINO_XMR_API_KEY ? "enabled" : "DISABLED (CASINO_XMR_API_KEY not set)"}`);
 
   // Initial Base poll after 10s
   setTimeout(() => pollBaseDeposits(), 10_000);
@@ -801,12 +1007,18 @@ export function startDepositMonitor(): void {
   // Wagyu pending swap checker — after 20s, then every 30s
   setTimeout(() => checkPendingWagyuSwaps(), 20_000);
   wagyuTimer = setInterval(checkPendingWagyuSwaps, WAGYU_POLL_INTERVAL_MS);
+
+  // XMR polling — after 60s (let other pollers start first), then every 5 min
+  if (CASINO_XMR_API_KEY) {
+    setTimeout(() => pollXmrDeposits(), 60_000);
+    xmrTimer = setInterval(pollXmrDeposits, XMR_POLL_INTERVAL_MS);
+  }
 }
 
 // ─── Stop the deposit monitor ───
 
 export function stopDepositMonitor(): void {
-  [baseTimer, nonBaseTimer, wagyuTimer].forEach(t => t && clearInterval(t));
-  baseTimer = nonBaseTimer = wagyuTimer = null;
+  [baseTimer, nonBaseTimer, wagyuTimer, xmrTimer].forEach(t => t && clearInterval(t));
+  baseTimer = nonBaseTimer = wagyuTimer = xmrTimer = null;
   console.log("[deposit-monitor] Stopped");
 }

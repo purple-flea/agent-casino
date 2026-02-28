@@ -6,6 +6,7 @@ import { hashApiKey } from "../middleware/auth.js";
 import { ledger } from "../wallet/ledger.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { sendUsdc } from "../crypto/chain.js";
+import { deriveXmrDepositKeys } from "../crypto/xmr.js";
 import type { AppEnv } from "../types.js";
 
 const WALLET_SERVICE_URL = process.env.WALLET_SERVICE_URL || "http://localhost:3002";
@@ -258,6 +259,28 @@ auth.post("/deposit-address", async (c) => {
       note: info.note,
       withdrawals: "USDC on Base only — all deposits converted to USD balance",
     });
+  }
+
+  // Monero: derive address deterministically from TREASURY_PRIVATE_KEY + agentId
+  // This produces a valid Monero address we can scan with a view key (no wallet service needed).
+  if (chain === "monero") {
+    const masterKey = process.env.TREASURY_PRIVATE_KEY || "";
+    if (!masterKey) {
+      return c.json({ error: "xmr_not_configured", message: "XMR deposits not available (missing TREASURY_PRIVATE_KEY)" }, 503);
+    }
+    const { address: xmrAddress } = deriveXmrDepositKeys(agentId, masterKey);
+    db.insert(schema.depositAddresses).values({ agentId, chain, address: xmrAddress }).run();
+    return c.json({
+      chain,
+      address: xmrAddress,
+      send_token: info.send_token,
+      send_instructions: info.send_instructions,
+      auto_swap: info.auto_swap,
+      swap_fee: info.swap_fee,
+      minimum: info.minimum,
+      note: info.note,
+      withdrawals: "USDC on Base only — all deposits converted to USD balance",
+    }, 201);
   }
 
   // Request real wallet address from wallet service
@@ -603,7 +626,7 @@ auth.get("/referral/code", async (c) => {
   return c.json({
     referral_code: agent.referralCode,
     commission_rate: "10% of net losses from referred agents",
-    share_message: "Sign up at api.purpleflea.com/v1/casino with referral_code: " + agent.referralCode,
+    share_message: "Register at https://casino.purpleflea.com with referral_code: " + agent.referralCode,
   });
 });
 
