@@ -1684,3 +1684,6 @@ export { app };
 
 // ─── /for-agents — machine-readable landing page for AI agent crawlers ───
 app.use('/for-agents', serveStatic({ path: 'public/for-agents.html' }));
+
+// ─── /earn — referral landing page ───
+app.use('/earn', serveStatic({ path: 'public/earn.html' }));
