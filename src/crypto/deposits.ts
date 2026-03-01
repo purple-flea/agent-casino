@@ -95,7 +95,7 @@ const EVM_SWAP_CHAINS: NonBaseChain[] = ["ethereum", "bsc", "arbitrum"];
 
 // RPC URLs for non-Base EVM chains
 const EVM_RPC: Record<string, string> = {
-  ethereum: "https://eth.llamarpc.com",
+  ethereum: "https://ethereum.publicnode.com",
   bsc: "https://bsc-dataseed.binance.org",
   arbitrum: "https://arb1.arbitrum.io/rpc",
 };
