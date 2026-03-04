@@ -282,6 +282,8 @@ api.use("/fairness/*", authMiddleware);
 // Note: /stats/leaderboard is public; all other /stats/* require auth
 api.use("/stats/me", authMiddleware);
 api.use("/stats/session", authMiddleware);
+api.use("/stats/streak", authMiddleware);
+api.use("/stats/pay", authMiddleware);
 api.use("/tournaments/create", authMiddleware);
 api.use("/tournaments/:id/enter", authMiddleware);
 api.use("/tournaments/:id/play", authMiddleware);

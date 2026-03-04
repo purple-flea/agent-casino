@@ -11,6 +11,8 @@ import {
   playSlots,
   playSimpleDice,
   playHiLo,
+  playKeno,
+  playScratchCard,
   playBatch,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
@@ -138,6 +140,33 @@ games.get("/", (c) => {
         endpoint: "POST /api/v1/games/hilo",
         params: { guess: "higher | lower", amount: "number", client_seed: "string (optional)" },
         example: { guess: "higher", amount: 5, note: "Payout depends on first card — higher card = harder to guess higher" },
+      },
+      {
+        id: "keno",
+        name: "Keno",
+        description: "Pick 1-10 numbers from 1-80. House draws 20 numbers. Payout scales with how many of your picks are drawn. Up to 250,000x jackpot for 10/10.",
+        house_edge: "~8%",
+        payout: "3.5x (1-spot catch) to 250,000x (10/10 match)",
+        endpoint: "POST /api/v1/games/keno",
+        params: { picks: "array of 1-10 integers (1-80)", amount: "number", client_seed: "string (optional)" },
+        example: { picks: [7, 14, 21, 42, 77], amount: 5 },
+        payout_table: {
+          "1 spot: catch 1": "3.5x",
+          "2 spots: catch 2": "16x",
+          "3 spots: 2 catch=2x, 3 catch=50x": "",
+          "5 spots: 3=3x, 4=25x, 5=1000x": "",
+          "10 spots: 5=10x, 7=500x, 10=250000x": "",
+        },
+      },
+      {
+        id: "scratch_card",
+        name: "Scratch Card",
+        description: "Reveal 3 symbols. Triple match wins big. Any pair wins 2x. Instant result, provably fair.",
+        house_edge: "~10%",
+        payout: "2x (pair) to 50x (triple diamond)",
+        endpoint: "POST /api/v1/games/scratch-card",
+        params: { amount: "number", client_seed: "string (optional)" },
+        symbols: ["💎 50x", "7️⃣ 20x", "⭐ 15x", "🍀 12x", "🔔 8x", "🍒 5x", "pair 2x"],
       },
     ],
     batch_endpoint: "POST /api/v1/bets/batch",
@@ -322,6 +351,41 @@ games.post("/hilo", async (c) => {
   }
 
   const result = playHiLo(agentId, guess, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Keno ───
+
+games.post("/keno", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const { picks, amount, client_seed } = body;
+
+  if (!Array.isArray(picks) || picks.length < 1 || picks.length > 10) {
+    return c.json({ error: "invalid_picks", message: "picks must be an array of 1-10 unique integers between 1-80", example: { picks: [7, 14, 21, 42, 77], amount: 5 } }, 400);
+  }
+
+  const result = playKeno(agentId, picks, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Scratch Card ───
+
+games.post("/scratch-card", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { amount, client_seed } = await c.req.json().catch(() => ({}));
+
+  const result = playScratchCard(agentId, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });

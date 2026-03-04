@@ -981,6 +981,158 @@ export function playHiLo(
   );
 }
 
+// ─── Keno ───
+
+// Payout table: [spots_picked][matches] = multiplier (0 = lose)
+const KENO_PAYOUTS: Record<number, Record<number, number>> = {
+  1:  { 0: 0, 1: 3.5 },
+  2:  { 0: 0, 1: 0, 2: 16 },
+  3:  { 0: 0, 1: 0, 2: 2, 3: 50 },
+  4:  { 0: 0, 1: 0, 2: 1, 3: 5, 4: 200 },
+  5:  { 0: 0, 1: 0, 2: 0, 3: 3, 4: 25, 5: 1000 },
+  6:  { 0: 0, 1: 0, 2: 0, 3: 2, 4: 10, 5: 200, 6: 5000 },
+  7:  { 0: 0, 1: 0, 2: 0, 3: 0, 4: 5, 5: 60, 6: 700, 7: 10000 },
+  8:  { 0: 0, 1: 0, 2: 0, 3: 0, 4: 2, 5: 25, 6: 300, 7: 3000, 8: 50000 },
+  9:  { 0: 0, 1: 0, 2: 0, 3: 0, 4: 1, 5: 15, 6: 100, 7: 1000, 8: 5000, 9: 100000 },
+  10: { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 10, 6: 50, 7: 500, 8: 2000, 9: 10000, 10: 250000 },
+};
+
+export function playKeno(
+  agentId: string,
+  picks: number[],
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  if (!Array.isArray(picks) || picks.length < 1 || picks.length > 10) {
+    return { error: "invalid_picks", message: "Pick between 1 and 10 numbers" };
+  }
+  const uniquePicks = [...new Set(picks.map(Number))].filter(n => Number.isInteger(n) && n >= 1 && n <= 80);
+  if (uniquePicks.length !== picks.length) {
+    return { error: "invalid_picks", message: "Each pick must be a unique integer between 1 and 80" };
+  }
+
+  const spotsCount = uniquePicks.length;
+  // Approximate win probability for Kelly: use ~0.30 avg win chance across all spot counts
+  const approxWinProb = 0.30;
+  const approxPayout = 3.0;
+
+  const validation = validateAndReserve(agentId, amount, approxWinProb, approxPayout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  // Draw 20 unique numbers from 1-80 using sequential nonces
+  const drawn = new Set<number>();
+  let nonce = incrementNonce(seed.id);
+  const firstNonce = nonce;
+  let attempts = 0;
+  while (drawn.size < 20 && attempts < 200) {
+    const raw = calculateResult(seed.seed, cs, nonce + attempts);
+    const num = (Math.floor(raw * 10000) % 80) + 1;
+    drawn.add(num);
+    attempts++;
+  }
+  // Burn extra nonces to advance the sequence
+  for (let i = 1; i < Math.min(attempts, 25); i++) {
+    incrementNonce(seed.id);
+  }
+
+  const drawnNumbers = [...drawn].sort((a, b) => a - b);
+  const matches = uniquePicks.filter(p => drawn.has(p)).length;
+  const payoutTable = KENO_PAYOUTS[spotsCount];
+  const payoutMultiplier = payoutTable[matches] ?? 0;
+  const won = payoutMultiplier > 0;
+
+  const resultHash = getResultHash(seed.seed, cs, firstNonce);
+
+  return settleBet(
+    agentId, betId, amount, won, payoutMultiplier,
+    "keno",
+    {
+      picks: uniquePicks,
+      drawn: drawnNumbers,
+      matches,
+      spots_picked: spotsCount,
+      spots_drawn: 20,
+      range: "1-80",
+      payout_multiplier: payoutMultiplier,
+      payout_table: payoutTable,
+      note: "Pick 1-10 numbers from 1-80. House draws 20. Payout scales with matches.",
+    },
+    seed.seed, seed.seedHash, cs, firstNonce, resultHash
+  );
+}
+
+// ─── Scratch Card ───
+
+const SCRATCH_SYMBOLS = ["💎", "7️⃣", "⭐", "🍀", "🔔", "🍒"] as const;
+type ScratchSymbol = typeof SCRATCH_SYMBOLS[number];
+const SCRATCH_PAYOUTS: Record<string, number> = {
+  "💎": 50,  // 3x diamond = 50x
+  "7️⃣": 20,  // 3x sevens = 20x
+  "⭐": 15,  // 3x stars = 15x
+  "🍀": 12,  // 3x clover = 12x
+  "🔔": 8,   // 3x bell = 8x
+  "🍒": 5,   // 3x cherry = 5x
+  "any2": 2,  // any two matching = 2x
+};
+
+export function playScratchCard(
+  agentId: string,
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  const approxWinProb = 0.40; // ~40% of scratches win something
+  const approxPayout = 2.0;
+
+  const validation = validateAndReserve(agentId, amount, approxWinProb, approxPayout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const n1 = incrementNonce(seed.id);
+  const n2 = incrementNonce(seed.id);
+  const n3 = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const r1 = calculateResult(seed.seed, cs, n1);
+  const r2 = calculateResult(seed.seed, cs, n2);
+  const r3 = calculateResult(seed.seed, cs, n3);
+
+  const s1 = SCRATCH_SYMBOLS[Math.floor(r1 * 100) % SCRATCH_SYMBOLS.length];
+  const s2 = SCRATCH_SYMBOLS[Math.floor(r2 * 100) % SCRATCH_SYMBOLS.length];
+  const s3 = SCRATCH_SYMBOLS[Math.floor(r3 * 100) % SCRATCH_SYMBOLS.length];
+
+  let payoutMultiplier = 0;
+  let winType = "no_match";
+
+  if (s1 === s2 && s2 === s3) {
+    payoutMultiplier = SCRATCH_PAYOUTS[s1] ?? 5;
+    winType = `triple_${s1}`;
+  } else if (s1 === s2 || s2 === s3 || s1 === s3) {
+    payoutMultiplier = SCRATCH_PAYOUTS["any2"];
+    winType = "pair";
+  }
+
+  const won = payoutMultiplier > 0;
+  const resultHash = getResultHash(seed.seed, cs, n1);
+
+  return settleBet(
+    agentId, betId, amount, won, payoutMultiplier,
+    "scratch_card",
+    {
+      symbols: [s1, s2, s3],
+      win_type: winType,
+      payout_multiplier: payoutMultiplier,
+      payout_table: { triple_diamond: "50x", triple_seven: "20x", triple_star: "15x", triple_clover: "12x", triple_bell: "8x", triple_cherry: "5x", any_pair: "2x", no_match: "0x" },
+      note: "Scratch 3 symbols. Triple match wins big, any pair wins 2x.",
+    },
+    seed.seed, seed.seedHash, cs, n1, resultHash
+  );
+}
+
 // ─── Batch Betting ───
 
 interface BatchBetInput {
@@ -998,6 +1150,7 @@ interface BatchBetInput {
   rows?: 8 | 12 | 16;
   risk?: "low" | "medium" | "high";
   pick?: number;
+  picks?: number[];
   guess?: "higher" | "lower";
   client_seed?: string;
 }
@@ -1031,6 +1184,10 @@ export function playBatch(agentId: string, bets: BatchBetInput[]): (BetResult | 
         return playSimpleDice(agentId, bet.pick || 3, bet.amount, bet.client_seed);
       case "hilo":
         return playHiLo(agentId, bet.guess || "higher", bet.amount, bet.client_seed);
+      case "keno":
+        return playKeno(agentId, bet.picks || [1, 2, 3], bet.amount, bet.client_seed);
+      case "scratch_card":
+        return playScratchCard(agentId, bet.amount, bet.client_seed);
       default:
         return { error: "unknown_game", message: `Unknown game: ${bet.game}` };
     }

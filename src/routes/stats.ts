@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import { randomUUID } from "crypto";
 import { db, schema } from "../db/index.js";
 import { eq, desc, sql, count, and, gte } from "drizzle-orm";
+import { ledger } from "../wallet/ledger.js";
 import type { AppEnv } from "../types.js";
 
 const stats = new Hono<AppEnv>();
@@ -376,6 +378,140 @@ stats.get("/profit-leaderboard", async (c) => {
     period_options: ["today", "week", "month", "all"],
     tip: "Add ?period=week for last 7 days. ?period=today for today's top gainers.",
     updated_at: new Date().toISOString(),
+  });
+});
+
+// ─── Current win/loss streak ───
+stats.get("/streak", (c) => {
+  const agentId = c.get("agentId") as string;
+
+  const recentBets = db.select({
+    won: schema.bets.won,
+    game: schema.bets.game,
+    amount: schema.bets.amount,
+    amountWon: schema.bets.amountWon,
+    createdAt: schema.bets.createdAt,
+  })
+    .from(schema.bets)
+    .where(eq(schema.bets.agentId, agentId))
+    .orderBy(desc(schema.bets.createdAt))
+    .limit(100)
+    .all();
+
+  if (recentBets.length === 0) {
+    return c.json({ current_streak: 0, streak_type: null, last_result: null, tip: "Place bets to start building a streak" });
+  }
+
+  // Calculate current streak
+  const firstResult = recentBets[0].won;
+  let currentStreak = 0;
+  for (const bet of recentBets) {
+    if (bet.won === firstResult) currentStreak++;
+    else break;
+  }
+
+  // Best win streak across last 100 bets
+  let bestWinStreak = 0, tempStreak = 0;
+  for (const bet of [...recentBets].reverse()) {
+    if (bet.won) { tempStreak++; bestWinStreak = Math.max(bestWinStreak, tempStreak); }
+    else tempStreak = 0;
+  }
+
+  // Hot/cold analysis per game (last 20 bets)
+  const last20 = recentBets.slice(0, 20);
+  const gameStats: Record<string, { wins: number; total: number }> = {};
+  for (const b of last20) {
+    if (!gameStats[b.game]) gameStats[b.game] = { wins: 0, total: 0 };
+    gameStats[b.game].total++;
+    if (b.won) gameStats[b.game].wins++;
+  }
+
+  const hotGames = Object.entries(gameStats)
+    .filter(([, s]) => s.total >= 3 && s.wins / s.total > 0.6)
+    .map(([g, s]) => ({ game: g, win_rate: Math.round(s.wins / s.total * 100), sample: s.total }));
+
+  const coldGames = Object.entries(gameStats)
+    .filter(([, s]) => s.total >= 3 && s.wins / s.total < 0.35)
+    .map(([g, s]) => ({ game: g, win_rate: Math.round(s.wins / s.total * 100), sample: s.total }));
+
+  const streakEmoji = firstResult
+    ? (currentStreak >= 5 ? "🔥" : currentStreak >= 3 ? "✅" : "➕")
+    : (currentStreak >= 5 ? "🧊" : "❌");
+
+  return c.json({
+    current_streak: currentStreak,
+    streak_type: firstResult ? "winning" : "losing",
+    streak_emoji: streakEmoji,
+    last_result: { won: recentBets[0].won, game: recentBets[0].game, amount: recentBets[0].amount },
+    best_win_streak_last_100: bestWinStreak,
+    recent_win_rate: Math.round(last20.filter(b => b.won).length / Math.max(1, last20.length) * 100),
+    hot_games: hotGames,
+    cold_games: coldGames,
+    sample_size: Math.min(recentBets.length, 100),
+  });
+});
+
+// ─── Agent-to-agent payment ───
+// Transfer casino balance from one agent to another
+stats.post("/pay", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const body = await c.req.json().catch(() => ({}));
+  const { to_agent_id, amount, memo } = body as { to_agent_id?: string; amount?: number; memo?: string };
+
+  if (!to_agent_id || !amount) {
+    return c.json({
+      error: "invalid_request",
+      message: "Provide to_agent_id and amount",
+      example: { to_agent_id: "ag_abc123", amount: 5.00, memo: "Thanks for the signal" },
+    }, 400);
+  }
+
+  if (typeof amount !== "number" || amount < 0.01) {
+    return c.json({ error: "invalid_amount", message: "Amount must be at least $0.01" }, 400);
+  }
+
+  if (to_agent_id === agentId) {
+    return c.json({ error: "same_agent", message: "Cannot pay yourself" }, 400);
+  }
+
+  // Verify recipient exists
+  const recipient = db.select().from(schema.agents).where(eq(schema.agents.id, to_agent_id)).get();
+  if (!recipient) {
+    return c.json({ error: "recipient_not_found", message: `Agent ${to_agent_id} not found` }, 404);
+  }
+
+  // Check sender balance
+  const senderBalance = ledger.getBalance(agentId);
+  if (senderBalance < amount) {
+    return c.json({
+      error: "insufficient_balance",
+      message: `Your balance $${senderBalance.toFixed(2)} is less than $${amount.toFixed(2)}`,
+    }, 400);
+  }
+
+  const txId = `pay_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const now = Math.floor(Date.now() / 1000);
+
+  // Atomic: debit sender, credit recipient
+  ledger.debit(agentId, amount, "payment_sent", "payment", txId);
+  ledger.credit(to_agent_id, amount, "payment_received", "payment", txId);
+
+  // Update agent stats
+  db.update(schema.agents)
+    .set({ lastActive: now })
+    .where(eq(schema.agents.id, agentId))
+    .run();
+
+  return c.json({
+    tx_id: txId,
+    from: agentId,
+    to: to_agent_id,
+    amount,
+    memo: memo ?? null,
+    sender_new_balance: ledger.getBalance(agentId),
+    timestamp: new Date(now * 1000).toISOString(),
+    message: `$${amount.toFixed(2)} sent to ${to_agent_id}`,
+    note: "Payments are instant and irreversible within the casino platform.",
   });
 });
 
