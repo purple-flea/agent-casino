@@ -1353,6 +1353,234 @@ api.get("/records", (c) => {
   });
 });
 
+// ─── Public Hot Streaks (no auth, 60s cache) ───
+// Shows which agents are currently on active win/loss streaks (anonymized)
+
+api.get("/streaks", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
+
+  // Fetch all bets in the last 2h, ordered by agent + time
+  const recentBets = db
+    .select({ agentId: bets.agentId, won: bets.won, createdAt: bets.createdAt })
+    .from(bets)
+    .where(sql`${bets.createdAt} >= ${twoHoursAgo}`)
+    .orderBy(bets.agentId, desc(bets.createdAt))
+    .all();
+
+  // Group by agent (already descending by createdAt within each agent)
+  const agentBetMap: Record<string, { won: boolean; createdAt: number }[]> = {};
+  for (const bet of recentBets) {
+    if (!agentBetMap[bet.agentId]) agentBetMap[bet.agentId] = [];
+    agentBetMap[bet.agentId].push({ won: bet.won, createdAt: bet.createdAt });
+  }
+
+  // Compute current streak per agent
+  const streaks: { agentId: string; streak: number; type: "winning" | "losing"; lastAt: string }[] = [];
+  for (const [agentId, agentBets_] of Object.entries(agentBetMap)) {
+    if (agentBets_.length === 0) continue;
+    const firstWon = agentBets_[0].won;
+    let streak = 0;
+    for (const bet of agentBets_) {
+      if (bet.won === firstWon) streak++;
+      else break;
+    }
+    if (streak >= 2) {
+      streaks.push({
+        agentId,
+        streak,
+        type: firstWon ? "winning" : "losing",
+        lastAt: new Date(agentBets_[0].createdAt * 1000).toISOString(),
+      });
+    }
+  }
+
+  const hotStreaks = streaks
+    .filter(s => s.type === "winning")
+    .sort((a, b) => b.streak - a.streak)
+    .slice(0, 10)
+    .map((s, i) => ({
+      rank: i + 1,
+      agent: s.agentId.slice(0, 6) + "...",
+      current_win_streak: s.streak,
+      status: s.streak >= 7 ? "on_fire" : s.streak >= 5 ? "hot" : s.streak >= 3 ? "warm" : "active",
+      last_bet_at: s.lastAt,
+    }));
+
+  const coldStreaks = streaks
+    .filter(s => s.type === "losing")
+    .sort((a, b) => b.streak - a.streak)
+    .slice(0, 5)
+    .map((s, i) => ({
+      rank: i + 1,
+      agent: s.agentId.slice(0, 6) + "...",
+      current_loss_streak: s.streak,
+      status: s.streak >= 7 ? "ice_cold" : s.streak >= 5 ? "cold" : "cooling",
+      last_bet_at: s.lastAt,
+    }));
+
+  const activeAgents = Object.keys(agentBetMap).length;
+  const longestStreak = streaks.reduce((max, s) => s.streak > max ? s.streak : max, 0);
+
+  return c.json({
+    description: "Live agent win/loss streaks (last 2 hours, anonymized)",
+    active_agents_2h: activeAgents,
+    longest_active_streak: longestStreak,
+    hot_streaks: hotStreaks,
+    cold_streaks: coldStreaks,
+    note: "Agent IDs anonymized to first 6 chars. Streaks reset when run is broken.",
+    join: "POST /api/v1/auth/register to join the action",
+    updated: new Date().toISOString(),
+  });
+});
+
+// ─── House Performance Analytics (no auth, 120s cache) ───
+// Publicly shows the casino's RTP, game breakdown, and activity metrics
+
+api.get("/house-stats", (c) => {
+  c.header("Cache-Control", "public, max-age=120");
+
+  // Per-game statistics
+  const gameStats = db
+    .select({
+      game: bets.game,
+      totalBets: sql<number>`COUNT(*)`,
+      totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+      totalPaid: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+      wins: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+      biggestWin: sql<number>`COALESCE(MAX(${bets.amountWon}), 0)`,
+    })
+    .from(bets)
+    .groupBy(bets.game)
+    .all();
+
+  const totalWagered = gameStats.reduce((s, g) => s + g.totalWagered, 0);
+  const totalPaid = gameStats.reduce((s, g) => s + g.totalPaid, 0);
+  const totalBetsAll = gameStats.reduce((s, g) => s + g.totalBets, 0);
+
+  const byGame = gameStats
+    .sort((a, b) => b.totalWagered - a.totalWagered)
+    .map(g => ({
+      game: g.game,
+      total_bets: g.totalBets,
+      volume_usd: Math.round(g.totalWagered * 100) / 100,
+      paid_out_usd: Math.round(g.totalPaid * 100) / 100,
+      house_profit_usd: Math.round((g.totalWagered - g.totalPaid) * 100) / 100,
+      actual_rtp_pct: g.totalWagered > 0 ? Math.round((g.totalPaid / g.totalWagered) * 10000) / 100 : null,
+      player_win_rate_pct: g.totalBets > 0 ? Math.round((g.wins / g.totalBets) * 10000) / 100 : null,
+      biggest_win_usd: Math.round(g.biggestWin * 100) / 100,
+    }));
+
+  // Last 24h activity
+  const oneDayAgo = Math.floor(Date.now() / 1000) - 86400;
+  const today = db
+    .select({
+      count: sql<number>`COUNT(*)`,
+      wagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+    })
+    .from(bets)
+    .where(sql`${bets.createdAt} >= ${oneDayAgo}`)
+    .get();
+
+  const totalAgents = db.select({ count: sql<number>`count(*)` }).from(agents).get()?.count ?? 0;
+
+  return c.json({
+    description: "Casino house performance analytics — all-time and recent activity",
+    all_time: {
+      total_bets: totalBetsAll,
+      total_wagered_usd: Math.round(totalWagered * 100) / 100,
+      total_paid_out_usd: Math.round(totalPaid * 100) / 100,
+      house_profit_usd: Math.round((totalWagered - totalPaid) * 100) / 100,
+      overall_rtp_pct: totalWagered > 0 ? Math.round((totalPaid / totalWagered) * 10000) / 100 : null,
+      theoretical_rtp_pct: 99.5,
+      registered_agents: totalAgents,
+    },
+    last_24h: {
+      bets: today?.count ?? 0,
+      wagered_usd: Math.round((today?.wagered ?? 0) * 100) / 100,
+    },
+    by_game: byGame,
+    transparency: {
+      house_edge: "0.5% on most games, up to 9.5% on Wheel of Fortune",
+      provably_fair: "All bets use HMAC-SHA256 with published server seed hashes",
+      verify: "POST /api/v1/fairness/verify to verify any bet independently",
+      audit: "GET /api/v1/fairness/audit-summary for full fairness report (auth required)",
+    },
+    updated: new Date().toISOString(),
+  });
+});
+
+// ─── Referral Income Estimator (public, 60s cache) ───
+// Estimates monthly passive income from the 3-level referral program
+
+api.get("/referral/estimate", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const wageredStr = c.req.query("wagered");
+  const refsStr = c.req.query("refs");
+  const tier2Str = c.req.query("tier2_refs");
+  const tier3Str = c.req.query("tier3_refs");
+
+  const wageredPerRef = Math.max(0, parseFloat(wageredStr ?? "1000") || 1000);
+  const refs = Math.max(0, Math.min(10000, parseInt(refsStr ?? "10") || 10));
+  const tier2Refs = Math.max(0, Math.min(100000, parseInt(tier2Str ?? "30") || 30));
+  const tier3Refs = Math.max(0, Math.min(1000000, parseInt(tier3Str ?? "60") || 60));
+
+  // Commission: 10% / 5% / 2.5% of referred agents' net losses to house (house edge = 0.5%)
+  const HOUSE_EDGE = 0.005;
+  const TIER1 = 0.10;
+  const TIER2 = 0.05;
+  const TIER3 = 0.025;
+
+  const vol1 = wageredPerRef * refs;
+  const vol2 = wageredPerRef * tier2Refs;
+  const vol3 = wageredPerRef * tier3Refs;
+
+  const earn1 = Math.round(vol1 * HOUSE_EDGE * TIER1 * 100) / 100;
+  const earn2 = Math.round(vol2 * HOUSE_EDGE * TIER2 * 100) / 100;
+  const earn3 = Math.round(vol3 * HOUSE_EDGE * TIER3 * 100) / 100;
+  const total = Math.round((earn1 + earn2 + earn3) * 100) / 100;
+
+  return c.json({
+    description: "Estimated monthly referral income from the Purple Flea 3-level commission program",
+    scenario: {
+      wagered_per_ref_usd: wageredPerRef,
+      tier1_refs: refs,
+      tier2_refs: tier2Refs,
+      tier3_refs: tier3Refs,
+      tip: "Adjust with ?wagered=500&refs=5&tier2_refs=20&tier3_refs=50",
+    },
+    network_volume_usd: {
+      tier1: Math.round(vol1 * 100) / 100,
+      tier2: Math.round(vol2 * 100) / 100,
+      tier3: Math.round(vol3 * 100) / 100,
+      total: Math.round((vol1 + vol2 + vol3) * 100) / 100,
+    },
+    estimated_monthly_earnings_usd: {
+      tier1_commission: earn1,
+      tier2_commission: earn2,
+      tier3_commission: earn3,
+      total,
+      annualized: Math.round(total * 12 * 100) / 100,
+    },
+    commission_structure: {
+      tier1: "10% of your direct referrals' net losses to the house",
+      tier2: "5% of your referrals' referrals' net losses",
+      tier3: "2.5% of tier-2 referrals' referrals' net losses",
+      house_edge: "0.5% — commissions come from the house margin",
+      note: "Agents on winning streaks generate less commission. Long-run EV is steady.",
+    },
+    how_to_start: {
+      step_1: "POST /api/v1/auth/register to get your referral code",
+      step_2: "Share your code — new agents enter it at registration",
+      step_3: "GET /api/v1/gossip to see your live network and earnings",
+      step_4: "GET /api/v1/stats/referral-leaderboard to see top earners",
+    },
+    updated: new Date().toISOString(),
+  });
+});
+
 // ─── Game strategy guide (no auth) ───
 
 api.get("/strategy", (c) => {
