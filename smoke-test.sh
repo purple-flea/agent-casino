@@ -55,6 +55,7 @@ check GET /sitemap.xml "sitemap"
 check GET /.well-known/agent.json "agent.json"
 check GET /.well-known/purpleflea.json "purpleflea.json"
 check GET /network "network"
+check GET /network/stats "network stats"
 check GET /openapi.json "openapi spec"
 check GET /llms.txt "llms.txt"
 check GET /favicon.ico "favicon" "" 204
