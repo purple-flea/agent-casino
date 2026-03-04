@@ -10,6 +10,7 @@ import {
   playPlinko,
   playSlots,
   playSimpleDice,
+  playHiLo,
   playBatch,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
@@ -127,6 +128,16 @@ games.get("/", (c) => {
         endpoint: "POST /api/v1/games/simple-dice",
         params: { pick: "1-6 (integer)", amount: "number", client_seed: "string (optional)" },
         example: { pick: 3, amount: 10, "expected_if_win": 55 },
+      },
+      {
+        id: "hilo",
+        name: "Hi-Lo Card",
+        description: "A card is dealt (A-K). Guess if the next card is higher or lower. Payout scales with risk. Equal cards = push (no loss).",
+        house_edge: "~4%",
+        payout: "1.05x (easy) to 12x (long shot)",
+        endpoint: "POST /api/v1/games/hilo",
+        params: { guess: "higher | lower", amount: "number", client_seed: "string (optional)" },
+        example: { guess: "higher", amount: 5, note: "Payout depends on first card — higher card = harder to guess higher" },
       },
     ],
     batch_endpoint: "POST /api/v1/bets/batch",
@@ -292,6 +303,25 @@ games.post("/simple-dice", async (c) => {
   const { pick, amount, client_seed } = await c.req.json();
 
   const result = playSimpleDice(agentId, pick, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Hi-Lo Card Game ───
+
+games.post("/hilo", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { guess, amount, client_seed } = await c.req.json();
+
+  if (!["higher", "lower"].includes(guess)) {
+    return c.json({ error: "invalid_guess", message: "Guess must be 'higher' or 'lower'" }, 400);
+  }
+
+  const result = playHiLo(agentId, guess, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });

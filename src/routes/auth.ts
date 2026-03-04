@@ -693,4 +693,73 @@ auth.get("/referral/stats", async (c) => {
   });
 });
 
+// ─── Agent Tier ───
+
+const TIERS = [
+  { name: "Bronze",   min: 0,      max: 100,    commission_bonus: "0%",  kelly_multiplier: 1.0, daily_withdrawal: 500,   color: "#CD7F32" },
+  { name: "Silver",   min: 100,    max: 1000,   commission_bonus: "+1%", kelly_multiplier: 1.1, daily_withdrawal: 2000,  color: "#C0C0C0" },
+  { name: "Gold",     min: 1000,   max: 10000,  commission_bonus: "+2%", kelly_multiplier: 1.2, daily_withdrawal: 10000, color: "#FFD700" },
+  { name: "Platinum", min: 10000,  max: Infinity, commission_bonus: "+3%", kelly_multiplier: 1.3, daily_withdrawal: 50000, color: "#E5E4E2" },
+];
+
+function getTier(totalWagered: number) {
+  let result = TIERS[0];
+  for (const t of TIERS) { if (totalWagered >= t.min) result = t; }
+  return result;
+}
+
+auth.get("/tier", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const agent = c.get("agent") as typeof schema.agents.$inferSelect;
+
+  const wagered = agent.totalWagered ?? 0;
+  const tier = getTier(wagered);
+  const tierIdx = TIERS.indexOf(tier);
+  const nextTier = TIERS[tierIdx + 1] ?? null;
+
+  const betsCount = db.select({ c: sql<number>`COUNT(*)` })
+    .from(schema.bets).where(eq(schema.bets.agentId, agentId)).get();
+
+  const progressPct = nextTier
+    ? Math.min(100, Math.round(((wagered - tier.min) / (nextTier.min - tier.min)) * 10000) / 100)
+    : 100;
+
+  return c.json({
+    agent_id: agentId,
+    tier: {
+      name: tier.name,
+      color: tier.color,
+      wagered_threshold: tier.min,
+      benefits: {
+        commission_bonus: tier.commission_bonus,
+        kelly_multiplier: tier.kelly_multiplier,
+        daily_withdrawal_limit_usd: tier.daily_withdrawal,
+      },
+    },
+    progress: {
+      total_wagered_usd: Math.round(wagered * 100) / 100,
+      total_bets: betsCount?.c ?? 0,
+      next_tier: nextTier ? {
+        name: nextTier.name,
+        wagered_required: nextTier.min,
+        remaining_usd: Math.round((nextTier.min - wagered) * 100) / 100,
+        progress_pct: progressPct,
+      } : null,
+      at_max_tier: nextTier === null,
+    },
+    all_tiers: TIERS.map(t => ({
+      name: t.name,
+      min_wagered: t.min,
+      benefits: {
+        commission_bonus: t.commission_bonus,
+        kelly_multiplier: t.kelly_multiplier,
+        daily_withdrawal_usd: t.daily_withdrawal,
+      },
+    })),
+    tip: nextTier
+      ? `Wager $${Math.round((nextTier.min - wagered) * 100) / 100} more to reach ${nextTier.name} tier`
+      : "You are at maximum tier — Platinum benefits active",
+  });
+});
+
 export { auth };

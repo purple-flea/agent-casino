@@ -910,6 +910,77 @@ export function playSimpleDice(
   );
 }
 
+// ─── Hi-Lo Card Game ───
+
+const HILO_CARD_NAMES = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
+const HILO_HOUSE_EDGE = 0.04; // 4%
+
+export function playHiLo(
+  agentId: string,
+  guess: "higher" | "lower",
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  if (!["higher", "lower"].includes(guess)) {
+    return { error: "invalid_guess", message: "Guess must be 'higher' or 'lower'" };
+  }
+
+  // Use ~0.46 for Kelly (average win prob accounting for pushes at ~7.7%)
+  const approxWinProb = 0.46;
+  const approxPayout = 1.90;
+
+  const validation = validateAndReserve(agentId, amount, approxWinProb, approxPayout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce1 = incrementNonce(seed.id);
+  const nonce2 = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const raw1 = calculateResult(seed.seed, cs, nonce1);
+  const raw2 = calculateResult(seed.seed, cs, nonce2);
+
+  // Map to 1-13 (Ace=1, 2-10, Jack=11, Queen=12, King=13)
+  const card1 = (Math.floor(raw1 * 100000) % 13) + 1;
+  const card2 = (Math.floor(raw2 * 100000) % 13) + 1;
+
+  const isPush = card2 === card1;
+  let won = false;
+  let actualPayout = approxPayout;
+
+  if (isPush) {
+    // Push: return original bet (break even)
+    won = true;
+    actualPayout = 1.0;
+  } else {
+    won = guess === "higher" ? card2 > card1 : card2 < card1;
+    // Dynamic payout based on first card and guess direction
+    const cardsInFavor = guess === "higher" ? (13 - card1) : (card1 - 1);
+    const winProbActual = Math.max(0.01, Math.min(0.99, cardsInFavor / 12));
+    actualPayout = Math.min(12.0, Math.max(1.05, (1 / winProbActual) * (1 - HILO_HOUSE_EDGE)));
+  }
+
+  const resultHash = getResultHash(seed.seed, cs, nonce1);
+
+  return settleBet(
+    agentId, betId, amount, won, actualPayout,
+    "hilo",
+    {
+      card1,
+      card1_name: HILO_CARD_NAMES[card1 - 1],
+      card2,
+      card2_name: HILO_CARD_NAMES[card2 - 1],
+      guess,
+      result: isPush ? "push" : (won ? "win" : "loss"),
+      payout_applied: isPush ? "1.0x (push)" : `${actualPayout.toFixed(2)}x`,
+      house_edge_pct: HILO_HOUSE_EDGE * 100,
+      note: "Push on equal cards returns bet. Payout scales with probability — higher card = lower payout.",
+    },
+    seed.seed, seed.seedHash, cs, nonce1, resultHash
+  );
+}
+
 // ─── Batch Betting ───
 
 interface BatchBetInput {
@@ -927,6 +998,7 @@ interface BatchBetInput {
   rows?: 8 | 12 | 16;
   risk?: "low" | "medium" | "high";
   pick?: number;
+  guess?: "higher" | "lower";
   client_seed?: string;
 }
 
@@ -957,6 +1029,8 @@ export function playBatch(agentId: string, bets: BatchBetInput[]): (BetResult | 
         return playSlots(agentId, bet.amount, bet.client_seed);
       case "simple_dice":
         return playSimpleDice(agentId, bet.pick || 3, bet.amount, bet.client_seed);
+      case "hilo":
+        return playHiLo(agentId, bet.guess || "higher", bet.amount, bet.client_seed);
       default:
         return { error: "unknown_game", message: `Unknown game: ${bet.game}` };
     }

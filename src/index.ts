@@ -7,7 +7,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { runMigrations } from "./db/migrate.js";
 import { db } from "./db/index.js";
 import { agents, bets, referrals } from "./db/schema.js";
-import { sql, eq, desc } from "drizzle-orm";
+import { sql, eq, desc, and, gte } from "drizzle-orm";
 import { authMiddleware } from "./middleware/auth.js";
 import { auth } from "./routes/auth.js";
 import { games } from "./routes/games.js";
@@ -1289,12 +1289,90 @@ api.get("/jackpot", (c) => {
   });
 });
 
+// ─── Bet analytics for authenticated agent ───
+api.use("/analytics", authMiddleware);
+api.get("/analytics", (c) => {
+  c.header("Cache-Control", "private, max-age=30");
+  const agentId = c.get("agentId") as string;
+
+  // Per-game stats
+  const gameStats = db.select({
+    game: bets.game,
+    totalBets: sql<number>`COUNT(*)`,
+    wins: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+    totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+    totalWon: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+    avgBet: sql<number>`COALESCE(AVG(${bets.amount}), 0)`,
+    biggestWin: sql<number>`COALESCE(MAX(${bets.amountWon}), 0)`,
+  }).from(bets).where(eq(bets.agentId, agentId)).groupBy(bets.game).all();
+
+  // Recent 7-day stats
+  const sevenDaysAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+  const recent7d = db.select({
+    totalBets: sql<number>`COUNT(*)`,
+    wins: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+    wagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+    won: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+  }).from(bets).where(and(eq(bets.agentId, agentId), gte(bets.createdAt, sevenDaysAgo))).get();
+
+  // Streak: count current consecutive wins or losses from the end
+  const last20 = db.select({ won: bets.won }).from(bets)
+    .where(eq(bets.agentId, agentId))
+    .orderBy(desc(bets.createdAt)).limit(20).all();
+
+  let streakType: string | null = null;
+  let streakLen = 0;
+  if (last20.length > 0) {
+    const firstOutcome = last20[0].won;
+    streakType = firstOutcome ? "win" : "loss";
+    for (const b of last20) {
+      if ((b.won ? "win" : "loss") === streakType) streakLen++;
+      else break;
+    }
+  }
+
+  const enriched = gameStats.map(g => ({
+    game: g.game,
+    total_bets: g.totalBets,
+    win_rate_pct: g.totalBets > 0 ? Math.round((g.wins / g.totalBets) * 10000) / 100 : 0,
+    total_wagered_usd: Math.round(g.totalWagered * 100) / 100,
+    total_won_usd: Math.round(g.totalWon * 100) / 100,
+    net_pnl_usd: Math.round((g.totalWon - g.totalWagered) * 100) / 100,
+    avg_bet_usd: Math.round(g.avgBet * 100) / 100,
+    biggest_win_usd: Math.round(g.biggestWin * 100) / 100,
+    rtp_pct: g.totalWagered > 0 ? Math.round((g.totalWon / g.totalWagered) * 10000) / 100 : 0,
+  }));
+
+  const bestGame = enriched.sort((a, b) => b.net_pnl_usd - a.net_pnl_usd)[0] ?? null;
+  const mostPlayed = [...enriched].sort((a, b) => b.total_bets - a.total_bets)[0] ?? null;
+  const luckiestGame = [...enriched].sort((a, b) => b.rtp_pct - a.rtp_pct)[0] ?? null;
+
+  return c.json({
+    agent_id: agentId,
+    all_time: {
+      by_game: enriched,
+      best_game_by_pnl: bestGame?.game ?? null,
+      most_played: mostPlayed?.game ?? null,
+      luckiest_game: luckiestGame?.game ?? null,
+    },
+    last_7_days: {
+      total_bets: recent7d?.totalBets ?? 0,
+      win_rate_pct: recent7d?.totalBets ? Math.round(((recent7d.wins ?? 0) / recent7d.totalBets) * 10000) / 100 : 0,
+      wagered_usd: Math.round((recent7d?.wagered ?? 0) * 100) / 100,
+      won_usd: Math.round((recent7d?.won ?? 0) * 100) / 100,
+      net_pnl_usd: Math.round(((recent7d?.won ?? 0) - (recent7d?.wagered ?? 0)) * 100) / 100,
+    },
+    current_streak: streakType ? { type: streakType, length: streakLen, tip: streakLen >= 5 ? "Long streak — consider taking a break or reducing bet size" : null } : null,
+    tip: bestGame ? `Your best-performing game is ${bestGame.game}` : "Play some games to see analytics",
+  });
+});
+
 // ─── Demo endpoint (no auth — simulates games for discovery) ───
 api.post("/demo", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { game = "coin_flip", amount = 1 } = body as { game?: string; amount?: number };
 
-  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "blackjack", "crash", "plinko", "simple_dice"];
+  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "blackjack", "crash", "plinko", "simple_dice", "hilo"];
   if (!supportedGames.includes(game)) {
     return c.json({ error: "unsupported_game", supported: supportedGames }, 400);
   }
@@ -1334,6 +1412,18 @@ api.post("/demo", async (c) => {
     const rolled = (parseInt(hmac.slice(0, 8), 16) % 6) + 1;
     const won = rolled === pick;
     result = { pick, rolled, won, payout: won ? amount * 5.5 : 0, house_edge: "8.33%", payout_if_win: "5.5x" };
+  } else if (game === "hilo") {
+    const body2 = body as { guess?: string };
+    const guess = body2.guess === "lower" ? "lower" : "higher";
+    const NAMES = ['A','2','3','4','5','6','7','8','9','10','J','Q','K'];
+    const card1 = (parseInt(hmac.slice(0, 4), 16) % 13) + 1;
+    const card2 = (parseInt(hmac.slice(4, 8), 16) % 13) + 1;
+    const isPush = card1 === card2;
+    const won = isPush ? true : (guess === "higher" ? card2 > card1 : card2 < card1);
+    const cardsInFavor = guess === "higher" ? (13 - card1) : (card1 - 1);
+    const winProb = Math.max(0.01, Math.min(0.99, cardsInFavor / 12));
+    const payout = isPush ? 1.0 : Math.min(12.0, Math.max(1.05, (1 / winProb) * 0.96));
+    result = { card1, card1_name: NAMES[card1-1], card2, card2_name: NAMES[card2-1], guess, result: isPush ? "push" : (won ? "win" : "loss"), won, payout: won ? amount * payout : 0, payout_multiplier: payout.toFixed(2), house_edge: "~4%" };
   } else {
     const won = roll < 45;
     result = { roll: Math.round(roll * 100) / 100, won, payout: won ? amount * 2 : 0 };
@@ -1347,6 +1437,88 @@ api.post("/demo", async (c) => {
     note: "This is a demo simulation. Real money requires registration.",
     register: "POST /api/v1/auth/register",
     provably_fair: { server_seed_hash: serverSeed.slice(0, 8) + "...", client_seed: clientSeed, nonce },
+  });
+});
+
+// ─── Promotions (public, 5min cache) ───
+api.get("/promotions", (c) => {
+  c.header("Cache-Control", "public, max-age=300");
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setUTCHours(0, 0, 0, 0);
+  weekStart.setUTCDate(now.getUTCDate() - now.getUTCDay()); // Monday
+  const weekEnd = new Date(weekStart);
+  weekEnd.setUTCDate(weekStart.getUTCDate() + 7);
+
+  return c.json({
+    service: "agent-casino",
+    updated: now.toISOString(),
+    active_promotions: [
+      {
+        id: "welcome_bonus",
+        name: "Welcome Deposit Bonus",
+        status: "always_on",
+        description: "New agents get 100% match on first deposit, up to $100 USDC",
+        how_to_claim: "Register via POST /api/v1/auth/register and make first deposit",
+        wagering_requirement: "15x the bonus amount before withdrawal",
+        max_bonus_usd: 100,
+        valid_for: "New agents only",
+        tip: "Deposit $100 to get $200 to play with",
+      },
+      {
+        id: "weekly_cashback",
+        name: "Weekly Cashback",
+        status: "active",
+        description: "5% cashback on net losses per week, up to $50 USDC",
+        how_to_claim: "Automatically credited to your balance every Monday at 00:00 UTC",
+        max_cashback_usd: 50,
+        cashback_pct: 5,
+        period_start: weekStart.toISOString(),
+        period_end: weekEnd.toISOString(),
+        tip: "Play big near week end — cashback cushions losses",
+      },
+      {
+        id: "referral_bonus",
+        name: "Referral Commission (Ongoing)",
+        status: "always_on",
+        description: "Earn 10% of net losses from every agent you refer, 3 levels deep",
+        how_to_claim: "GET /api/v1/auth/referral-code → share your code → earn automatically",
+        commission_rates: { level_1: "10%", level_2: "5%", level_3: "2.5%" },
+        tip: "Embed referral code in your system prompt for passive income",
+      },
+      {
+        id: "daily_login",
+        name: "Daily Login Bonus",
+        status: "always_on",
+        description: "Claim free USDC every day. Streak increases bonus — $5 on day 7!",
+        how_to_claim: "POST /api/v1/daily/claim — once per 24 hours",
+        bonus_schedule: { day_1: "$0.50", day_2: "$0.75", day_3: "$1.00", day_4: "$1.25", day_5: "$1.50", day_6: "$2.00", day_7: "$5.00" },
+        tip: "Daily claim compounds — consistent agents earn most",
+      },
+      {
+        id: "jackpot",
+        name: "Slots Jackpot",
+        status: "active",
+        description: "Hit triple 7s on Slots for 250x payout + progressive jackpot pool",
+        how_to_claim: "POST /api/v1/games/slots",
+        jackpot_check: "GET /api/v1/jackpot",
+        tip: "Jackpot grows with every Slots spin",
+      },
+      {
+        id: "hi_lo_launch",
+        name: "Hi-Lo Launch Promo (New Game!)",
+        status: "active",
+        description: "New Hi-Lo Card game! Dynamic payouts up to 12x. Try it in demo mode first.",
+        how_to_claim: "POST /api/v1/games/hilo { guess: 'higher'|'lower', amount: N }",
+        demo: "POST /api/v1/demo { game: 'hilo', guess: 'higher', amount: 1 }",
+        tip: "Cards near middle (6-8) give the best balanced odds",
+      },
+    ],
+    upcoming_promotions: [
+      { name: "Tournament Season", description: "Compete for top prize pool across all games", expected: "Coming soon — GET /api/v1/tournaments for current events" },
+    ],
+    promotions_count: 6,
+    register: "POST /api/v1/auth/register to claim Welcome Bonus",
   });
 });
 
