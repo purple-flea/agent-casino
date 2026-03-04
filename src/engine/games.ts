@@ -1,4 +1,4 @@
-import { randomUUID } from "crypto";
+import { randomUUID, createHmac as _createHmac } from "crypto";
 import { db, schema } from "../db/index.js";
 import { eq, sql, and } from "drizzle-orm";
 import {
@@ -1325,6 +1325,8 @@ interface BatchBetInput {
   pick?: number;
   picks?: number[];
   guess?: "higher" | "lower";
+  mines?: number;
+  reveals?: number;
   client_seed?: string;
 }
 
@@ -1363,6 +1365,8 @@ export function playBatch(agentId: string, bets: BatchBetInput[]): (BetResult | 
         return playScratchCard(agentId, bet.amount, bet.client_seed);
       case "wheel":
         return playWheel(agentId, bet.amount, bet.client_seed);
+      case "mines":
+        return playMines(agentId, bet.mines || 3, bet.reveals || 3, bet.amount, bet.client_seed);
       default:
         return { error: "unknown_game", message: `Unknown game: ${bet.game}` };
     }
@@ -1382,6 +1386,7 @@ function getWinProbForGame(game: string, result: Record<string, unknown>): numbe
     case "crash": return (result.win_probability as number) || 0.5;
     case "plinko": return 0.5;
     case "slots": return 0.35;
+    case "mines": return (result.win_probability as number) || 0.5;
     default: return 0.5;
   }
 }
@@ -1439,6 +1444,83 @@ export function playWheel(
       house_edge_pct: 9.5,
       wheel: WHEEL_SECTORS.map(s => ({ label: s.label, multiplier: s.multiplier, probability: `${(s.probability * 100).toFixed(0)}%` })),
       note: "Spin the wheel! 8 sectors from 💥 BUST to 10x jackpot.",
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  );
+}
+
+// ─── Mines ───
+
+export function playMines(
+  agentId: string,
+  mines: number,
+  reveals: number,
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  if (!Number.isInteger(mines) || mines < 1 || mines > 24) {
+    return { error: "invalid_mines", message: "mines must be an integer between 1 and 24" };
+  }
+  if (!Number.isInteger(reveals) || reveals < 1 || reveals > 25 - mines) {
+    return { error: "invalid_reveals", message: `reveals must be an integer between 1 and ${25 - mines} for ${mines} mines` };
+  }
+
+  // Win probability: product of (safeCells-i)/(totalCells-i) for each reveal
+  let winProb = 1;
+  for (let i = 0; i < reveals; i++) {
+    winProb *= (25 - mines - i) / (25 - i);
+  }
+  // Payout = fair value with house edge (2.5% — honest for a mining game)
+  const MINES_EDGE = 0.025;
+  const payout = round4((1 / winProb) * (1 - MINES_EDGE));
+
+  const validation = validateAndReserve(agentId, amount, winProb, payout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  // Provably fair mine placement: Fisher-Yates shuffle of cells 0..24 using HMAC bytes
+  const hmacBuf = _createHmac("sha256", seed.seed).update(`${cs}:${nonce}:mines`).digest();
+  const grid = Array.from({ length: 25 }, (_, i) => i);
+  for (let i = 24; i > 0; i--) {
+    const byteIdx = (24 - i) % 32;
+    const swapVal = (hmacBuf[byteIdx] << 8) | hmacBuf[(byteIdx + 1) % 32];
+    const j = swapVal % (i + 1);
+    [grid[i], grid[j]] = [grid[j], grid[i]];
+  }
+  const mineSet = new Set(grid.slice(0, mines));
+
+  // Simulate revealing cells 0, 1, ..., reveals-1 in scan order
+  const revealedCells: number[] = [];
+  let hitMine = false;
+  let hitAt: number | null = null;
+  for (let i = 0; i < reveals; i++) {
+    revealedCells.push(i);
+    if (mineSet.has(i)) {
+      hitMine = true;
+      hitAt = i;
+      break;
+    }
+  }
+  const won = !hitMine;
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+
+  return settleBet(
+    agentId, betId, amount, won, payout,
+    "mines",
+    {
+      mines_count: mines,
+      reveals_count: reveals,
+      mine_positions: Array.from(mineSet).sort((a, b) => a - b),
+      revealed_cells: revealedCells,
+      hit_mine: hitMine,
+      hit_at_cell: hitAt,
+      win_probability: round4(winProb),
+      payout_on_win: payout,
+      note: "Cells numbered 0-24 in scan order (row-major on a 5x5 grid)",
     },
     seed.seed, seed.seedHash, cs, nonce, resultHash
   );

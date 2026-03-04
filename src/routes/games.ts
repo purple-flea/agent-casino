@@ -17,6 +17,7 @@ import {
   playVideoPokerDraw,
   playBatch,
   playWheel,
+  playMines,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
 import { checkRateLimit } from "../middleware/rateLimit.js";
@@ -180,6 +181,16 @@ games.get("/", (c) => {
         endpoint: "POST /api/v1/games/scratch-card",
         params: { amount: "number", client_seed: "string (optional)" },
         symbols: ["💎 50x", "7️⃣ 20x", "⭐ 15x", "🍀 12x", "🔔 8x", "🍒 5x", "pair 2x"],
+      },
+      {
+        id: "mines",
+        name: "Mines",
+        description: "5x5 grid with hidden mines. Reveal cells left-to-right, top-to-bottom. More mines + more reveals = higher payout. Hit a mine and you lose it all. Provably fair.",
+        house_edge: "2.5%",
+        payout: "Scales with risk: 1 mine 1 reveal=1.02x, 3 mines 5 reveals=~6x, 10 mines 10 reveals=~130x",
+        endpoint: "POST /api/v1/games/mines",
+        params: { mines: "1-24 (mines on the grid)", reveals: "1 to 25-mines (tiles to reveal)", amount: "number", client_seed: "string (optional)" },
+        example: { mines: 3, reveals: 5, amount: 10, note: "3 mines, reveal 5 tiles — moderate risk" },
       },
       {
         id: "video_poker",
@@ -416,6 +427,29 @@ games.post("/wheel", async (c) => {
   const { amount, client_seed } = await c.req.json().catch(() => ({}));
 
   const result = playWheel(agentId, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Mines ───
+
+games.post("/mines", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const { mines, reveals, amount, client_seed } = body;
+
+  if (!Number.isInteger(mines) || mines < 1 || mines > 24) {
+    return c.json({ error: "invalid_mines", message: "mines must be an integer 1-24", example: { mines: 3, reveals: 5, amount: 10 } }, 400);
+  }
+  if (!Number.isInteger(reveals) || reveals < 1 || reveals > 25 - mines) {
+    return c.json({ error: "invalid_reveals", message: `reveals must be 1 to ${25 - mines} for ${mines} mines`, example: { mines: 3, reveals: 5, amount: 10 } }, 400);
+  }
+
+  const result = playMines(agentId, mines, reveals, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });

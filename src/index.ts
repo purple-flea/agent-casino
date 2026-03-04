@@ -1269,6 +1269,90 @@ api.get("/game-temperature", (c) => {
   });
 });
 
+// ─── All-time Game Records (public, 120s cache) ───
+
+api.get("/records", (c) => {
+  c.header("Cache-Control", "public, max-age=120");
+
+  // Biggest single win amount per game
+  const biggestWins = db
+    .select({
+      game: bets.game,
+      amount_won: bets.amountWon,
+      amount_bet: bets.amount,
+      payout_multiplier: bets.payoutMultiplier,
+      agent_id: bets.agentId,
+      created_at: bets.createdAt,
+    })
+    .from(bets)
+    .where(sql`${bets.won} = 1`)
+    .orderBy(desc(bets.amountWon))
+    .limit(50)
+    .all();
+
+  // Group biggest win per game
+  const recordsByGame: Record<string, { amount_won: number; payout_multiplier: number; agent_short: string; date: string }> = {};
+  for (const b of biggestWins) {
+    if (!recordsByGame[b.game]) {
+      recordsByGame[b.game] = {
+        amount_won: Math.round(b.amount_won * 100) / 100,
+        payout_multiplier: b.payout_multiplier,
+        agent_short: b.agent_id.slice(0, 10) + "...",
+        date: new Date(b.created_at * 1000).toISOString().slice(0, 10),
+      };
+    }
+  }
+
+  // Highest single payout multiplier
+  const highestMultiplier = db
+    .select({
+      game: bets.game,
+      payout_multiplier: bets.payoutMultiplier,
+      amount_bet: bets.amount,
+      amount_won: bets.amountWon,
+      agent_id: bets.agentId,
+      created_at: bets.createdAt,
+    })
+    .from(bets)
+    .where(sql`${bets.won} = 1`)
+    .orderBy(desc(bets.payoutMultiplier))
+    .limit(10)
+    .all();
+
+  const allTimeHighest = highestMultiplier.map(b => ({
+    game: b.game,
+    payout_multiplier: b.payout_multiplier,
+    amount_bet: Math.round(b.amount_bet * 100) / 100,
+    amount_won: Math.round(b.amount_won * 100) / 100,
+    agent_short: b.agent_id.slice(0, 10) + "...",
+    date: new Date(b.created_at * 1000).toISOString().slice(0, 10),
+  }));
+
+  // Global totals
+  const totals = db.select({
+    totalBets: sql<number>`COUNT(*)`,
+    totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+    totalPaidOut: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+    biggestSingleWin: sql<number>`COALESCE(MAX(${bets.amountWon}), 0)`,
+    highestMultiplier: sql<number>`COALESCE(MAX(${bets.payoutMultiplier}), 0)`,
+  }).from(bets).get()!;
+
+  return c.json({
+    description: "All-time casino records across all games and agents",
+    global: {
+      total_bets: totals.totalBets,
+      total_wagered_usd: Math.round(totals.totalWagered * 100) / 100,
+      total_paid_out_usd: Math.round(totals.totalPaidOut * 100) / 100,
+      biggest_single_win_usd: Math.round(totals.biggestSingleWin * 100) / 100,
+      highest_multiplier_hit: totals.highestMultiplier,
+    },
+    records_by_game: recordsByGame,
+    top_multipliers_all_time: allTimeHighest,
+    participate: "POST /api/v1/auth/register to set new records",
+    updated: new Date().toISOString(),
+  });
+});
+
 // ─── Game strategy guide (no auth) ───
 
 api.get("/strategy", (c) => {
