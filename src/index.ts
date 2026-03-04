@@ -467,6 +467,92 @@ api.get("/bankroll-ruin", (c) => {
   });
 });
 
+// ─── Bet Sizing Assistant (public, no auth, 30s cache) ───
+// GET /api/v1/bet-assist?balance=100&risk=low|medium|high|degen
+api.get("/bet-assist", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const balance = parseFloat(c.req.query("balance") ?? "100");
+  const risk = (c.req.query("risk") ?? "medium").toLowerCase();
+
+  if (isNaN(balance) || balance < 0.01) {
+    return c.json({ error: "invalid_balance", message: "balance must be a positive number (e.g. ?balance=100)" }, 400);
+  }
+  const validRisks = ["low", "medium", "high", "degen"];
+  if (!validRisks.includes(risk)) {
+    return c.json({ error: "invalid_risk", message: "risk must be: low, medium, high, or degen", valid: validRisks }, 400);
+  }
+
+  // Fractional Kelly multipliers by risk profile
+  const kellyFractionMap: Record<string, number> = { low: 0.1, medium: 0.25, high: 0.5, degen: 1.0 };
+  const kellyFraction = kellyFractionMap[risk]!;
+
+  // All games: win probability, payout multiplier, house edge, description
+  const games = [
+    { id: "coin_flip",    name: "Coin Flip",         winProb: 0.5,    payout: 1.99, houseEdge: 0.5,  note: "Lowest house edge — best EV per bet" },
+    { id: "blackjack",    name: "Blackjack",          winProb: 0.425,  payout: 2.1,  houseEdge: 0.5,  note: "Skill-based, near coin-flip edge" },
+    { id: "dice",         name: "Dice (over/under)",  winProb: 0.4925, payout: 1.98, houseEdge: 0.75, note: "Configurable risk via threshold" },
+    { id: "multiplier",   name: "Multiplier",         winProb: 0.5,    payout: 1.96, houseEdge: 2.0,  note: "Adjustable crash-out multiplier" },
+    { id: "slots",        name: "Slots",              winProb: 0.35,   payout: 2.85, houseEdge: 3.0,  note: "Higher variance for larger swings" },
+    { id: "plinko",       name: "Plinko",             winProb: 0.35,   payout: 2.8,  houseEdge: 4.0,  note: "Visual game, medium variance" },
+    { id: "roulette",     name: "Roulette",           winProb: 18/38,  payout: 2.0,  houseEdge: 5.26, note: "Classic, high spin count" },
+    { id: "scratch_card", name: "Scratch Card",       winProb: 0.33,   payout: 2.7,  houseEdge: 10.8, note: "High edge, instant reveal" },
+    { id: "keno",         name: "Keno",               winProb: 0.25,   payout: 3.5,  houseEdge: 12.5, note: "High variance, lottery feel" },
+    { id: "simple_dice",  name: "Dice (pick 1-6)",    winProb: 1/6,    payout: 5.5,  houseEdge: 8.33, note: "Highest single-win multiplier" },
+    { id: "wheel",        name: "Wheel of Fortune",   winProb: 0.65,   payout: 1.43, houseEdge: 9.5,  note: "Multi-sector, jackpot possible" },
+  ];
+
+  const recommendations = games.map((g) => {
+    const q = 1 - g.winProb;
+    const fullKelly = Math.max(0, (g.winProb * (g.payout - 1) - q) / (g.payout - 1));
+    const adjustedKelly = fullKelly * kellyFraction;
+    const recommendedBet = Math.min(balance, Math.round(Math.max(0.01, balance * adjustedKelly) * 100) / 100);
+    const maxSafeBet = Math.min(balance * 0.2, Math.round(balance * Math.min(adjustedKelly * 2, 0.15) * 100) / 100);
+    const expectedBetsBeforeRuin = recommendedBet > 0
+      ? Math.round(balance / (g.houseEdge / 100 * recommendedBet))
+      : 9999;
+    return {
+      game: g.id,
+      name: g.name,
+      house_edge_pct: g.houseEdge,
+      win_probability_pct: Math.round(g.winProb * 10000) / 100,
+      payout: `${g.payout}x`,
+      recommended_bet_usd: recommendedBet,
+      max_safe_bet_usd: Math.max(0.01, maxSafeBet),
+      kelly_fraction_pct: Math.round(adjustedKelly * 10000) / 100,
+      expected_bets_before_ruin: Math.min(expectedBetsBeforeRuin, 99999),
+      note: g.note,
+    };
+  }).sort((a, b) => a.house_edge_pct - b.house_edge_pct);
+
+  const sessionBudgetPct = { low: 0.2, medium: 0.35, high: 0.5, degen: 0.8 }[risk]!;
+  const maxSessionBets = { low: 200, medium: 100, high: 50, degen: 25 }[risk]!;
+
+  return c.json({
+    balance_usd: balance,
+    risk_profile: risk,
+    kelly_fraction_applied_pct: kellyFraction * 100,
+    games: recommendations,
+    session_management: {
+      stop_loss_usd: Math.round(balance * sessionBudgetPct * 100) / 100,
+      stop_loss_pct: sessionBudgetPct * 100,
+      take_profit_usd: Math.round(balance * (1 + sessionBudgetPct) * 100) / 100,
+      max_session_bets: maxSessionBets,
+      advice: {
+        low:    "10% Kelly — very conservative. Slow growth, minimal ruin risk. Good for learning.",
+        medium: "25% Kelly — the textbook balanced setting. Solid long-term growth.",
+        high:   "50% Kelly — half-Kelly: strong growth with higher variance. Expect swings.",
+        degen:  "Full Kelly — max long-run growth rate but extreme variance. ~30% short-session ruin risk.",
+      }[risk],
+    },
+    best_by_ev: recommendations[0].game,
+    worst_by_ev: recommendations[recommendations.length - 1].game,
+    register: "POST /api/v1/auth/register — get an API key + personalized Kelly limits based on real balance",
+    also_see: "GET /api/v1/bankroll-ruin?game=coin_flip&balance=100&bet_size=5 for ruin probability",
+    updated_at: new Date().toISOString(),
+  });
+});
+
 // ─── Per-game analytics (no auth) — useful for agents choosing games ───
 api.get("/game-stats", (c) => {
   c.header("Cache-Control", "public, max-age=300");
