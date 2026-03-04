@@ -276,6 +276,7 @@ api.route("/auth", auth);
 
 // Protected routes (specific paths, not wildcard so /games list stays public)
 api.use("/games/:game", authMiddleware);  // Only individual game plays need auth
+api.use("/games/video-poker/*", authMiddleware);  // Video poker has nested routes
 api.use("/bets/*", authMiddleware);
 api.use("/kelly/*", authMiddleware);
 api.use("/fairness/*", authMiddleware);

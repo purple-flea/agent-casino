@@ -13,6 +13,8 @@ import {
   playHiLo,
   playKeno,
   playScratchCard,
+  playVideoPokerDeal,
+  playVideoPokerDraw,
   playBatch,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
@@ -167,6 +169,23 @@ games.get("/", (c) => {
         endpoint: "POST /api/v1/games/scratch-card",
         params: { amount: "number", client_seed: "string (optional)" },
         symbols: ["💎 50x", "7️⃣ 20x", "⭐ 15x", "🍀 12x", "🔔 8x", "🍒 5x", "pair 2x"],
+      },
+      {
+        id: "video_poker",
+        name: "Video Poker (Jacks or Better)",
+        description: "2-phase game: deal 5 cards, choose which to hold, draw replacements. Payout based on final poker hand. ~98.5% RTP with optimal play.",
+        house_edge: "~1.5% (with optimal strategy)",
+        payout: "1x (Jacks or Better) to 800x (Royal Flush)",
+        endpoints: {
+          deal: "POST /api/v1/games/video-poker/deal — get 5 cards (free, no bet)",
+          draw: "POST /api/v1/games/video-poker/draw { holds, nonce, amount } — place bet, draw, evaluate hand",
+        },
+        payout_table: {
+          "Royal Flush": "800x", "Straight Flush": "50x", "Four of a Kind": "25x",
+          "Full House": "9x", "Flush": "6x", "Straight": "4x",
+          "Three of a Kind": "3x", "Two Pair": "2x", "Jacks or Better": "1x",
+        },
+        workflow: "1. POST /deal to see your hand. 2. Decide which cards to hold. 3. POST /draw with holds array + nonce from deal + your bet amount.",
       },
     ],
     batch_endpoint: "POST /api/v1/bets/batch",
@@ -386,6 +405,46 @@ games.post("/scratch-card", async (c) => {
   const { amount, client_seed } = await c.req.json().catch(() => ({}));
 
   const result = playScratchCard(agentId, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Video Poker ───
+
+// Phase 1: Deal (free - no bet, just shows cards)
+games.post("/video-poker/deal", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const { client_seed } = body;
+
+  const result = playVideoPokerDeal(agentId, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// Phase 2: Draw (places bet)
+games.post("/video-poker/draw", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const body = await c.req.json().catch(() => ({}));
+  const { holds, nonce, amount, client_seed } = body;
+
+  if (!Array.isArray(holds) || holds.length !== 5) {
+    return c.json({
+      error: "invalid_holds",
+      message: "holds must be an array of exactly 5 booleans",
+      example: { holds: [true, false, true, true, false], nonce: 42, amount: 5 },
+    }, 400);
+  }
+
+  const result = playVideoPokerDraw(agentId, nonce, holds, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });

@@ -1133,6 +1133,179 @@ export function playScratchCard(
   );
 }
 
+// ─── Video Poker (Jacks or Better) ───
+
+const VP_RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'] as const;
+const VP_SUITS = ['♠', '♥', '♦', '♣'] as const;
+type VPCard = { rank: typeof VP_RANKS[number]; suit: typeof VP_SUITS[number]; value: number };
+
+function vpCard(idx: number): VPCard {
+  const rank = VP_RANKS[idx % 13];
+  const suit = VP_SUITS[Math.floor(idx / 13)];
+  const value = idx % 13; // 0=2, ..., 8=10, 9=J, 10=Q, 11=K, 12=A
+  return { rank, suit, value };
+}
+
+function dealHand(seed: string, cs: string, startNonce: number): { cards: VPCard[]; used: number[] } {
+  const deck = Array.from({ length: 52 }, (_, i) => i);
+  const cards: VPCard[] = [];
+  const nonces: number[] = [];
+  let pool = [...deck];
+
+  for (let i = 0; i < 5; i++) {
+    const raw = calculateResult(seed, cs, startNonce + i);
+    const pick = Math.floor(raw * 10000) % pool.length;
+    cards.push(vpCard(pool[pick]));
+    nonces.push(startNonce + i);
+    pool.splice(pick, 1);
+  }
+  return { cards, used: nonces };
+}
+
+function drawCards(seed: string, cs: string, startNonce: number, initial: VPCard[], holds: boolean[]): VPCard[] {
+  // Draw replacements for non-held cards
+  // Use a simplified deck that excludes held card indices (not tracked, so use fresh nonces offset)
+  const final = [...initial];
+  let drawNonce = startNonce;
+  for (let i = 0; i < 5; i++) {
+    if (!holds[i]) {
+      const raw = calculateResult(seed, cs, drawNonce + 10 + i); // offset to avoid collision with deal nonces
+      const cardIdx = Math.floor(raw * 10000) % 52;
+      final[i] = vpCard(cardIdx);
+    }
+  }
+  return final;
+}
+
+type HandRank = { name: string; payout: number };
+
+function evaluateHand(cards: VPCard[]): HandRank {
+  const values = cards.map(c => c.value).sort((a, b) => a - b);
+  const suits = cards.map(c => c.suit);
+  const isFlush = suits.every(s => s === suits[0]);
+  const isAceLow = JSON.stringify(values) === JSON.stringify([0, 1, 2, 3, 12]); // A-2-3-4-5
+  const isStraight = (values[4] - values[0] === 4 && new Set(values).size === 5) || isAceLow;
+
+  const counts: Record<number, number> = {};
+  for (const v of values) counts[v] = (counts[v] ?? 0) + 1;
+  const freq = Object.values(counts).sort((a, b) => b - a);
+
+  const isRoyalFlush = isFlush && JSON.stringify(values) === JSON.stringify([8, 9, 10, 11, 12]); // 10-J-Q-K-A
+  if (isRoyalFlush) return { name: "Royal Flush", payout: 800 };
+  if (isFlush && isStraight) return { name: "Straight Flush", payout: 50 };
+  if (freq[0] === 4) return { name: "Four of a Kind", payout: 25 };
+  if (freq[0] === 3 && freq[1] === 2) return { name: "Full House", payout: 9 };
+  if (isFlush) return { name: "Flush", payout: 6 };
+  if (isStraight) return { name: "Straight", payout: 4 };
+  if (freq[0] === 3) return { name: "Three of a Kind", payout: 3 };
+  if (freq[0] === 2 && freq[1] === 2) return { name: "Two Pair", payout: 2 };
+  // Jacks or Better: pair with J, Q, K, or A (value >= 9)
+  if (freq[0] === 2) {
+    const pairValue = parseInt(Object.entries(counts).find(([, c]) => c === 2)![0]);
+    if (pairValue >= 9) return { name: "Jacks or Better", payout: 1 };
+  }
+  return { name: "High Card", payout: 0 };
+}
+
+export interface VideoPokerDealResult {
+  phase: "deal";
+  cards: { rank: string; suit: string }[];
+  nonce: number;
+  message: string;
+  instruction: string;
+}
+
+export interface VideoPokerDrawResult extends BetResult {
+  poker_hand: string;
+  initial_cards: { rank: string; suit: string }[];
+  final_cards: { rank: string; suit: string }[];
+  holds: boolean[];
+}
+
+export function playVideoPokerDeal(
+  agentId: string,
+  clientSeed?: string
+): VideoPokerDealResult | GameError {
+  // Validate agent exists + has balance (no cost for deal, just preview)
+  const agentRow = db.select().from(schema.agents).where(eq(schema.agents.id, agentId)).get();
+  if (!agentRow) return { error: "agent_not_found", message: "Agent not found" };
+  if (agentRow.balanceUsd < 0.01) return { error: "insufficient_balance", message: "Minimum balance $0.01 required to start a hand" };
+
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+  const { cards } = dealHand(seed.seed, cs, nonce);
+
+  return {
+    phase: "deal",
+    cards: cards.map(c => ({ rank: c.rank, suit: c.suit })),
+    nonce,
+    message: "Cards dealt. Choose which to hold, then call /games/video-poker/draw with holds array and nonce.",
+    instruction: "POST /api/v1/games/video-poker/draw { holds: [true,false,true,true,false], nonce, amount, client_seed? }",
+  };
+}
+
+export function playVideoPokerDraw(
+  agentId: string,
+  nonce: number,
+  holds: boolean[],
+  amount: number,
+  clientSeed?: string
+): VideoPokerDrawResult | GameError {
+  if (!Array.isArray(holds) || holds.length !== 5) {
+    return { error: "invalid_holds", message: "holds must be an array of exactly 5 booleans, e.g. [true, false, true, true, false]" };
+  }
+  if (typeof nonce !== "number" || !Number.isFinite(nonce)) {
+    return { error: "invalid_nonce", message: "nonce must be the number from the /deal response" };
+  }
+
+  // Use approx win prob for Kelly (Jacks or Better ~98.5% RTP with optimal play, ~45% win hands)
+  const approxWinProb = 0.45;
+  const approxPayout = 2.0;
+
+  const validation = validateAndReserve(agentId, amount, approxWinProb, approxPayout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  // Re-deal initial hand using provided nonce
+  const { cards: initialCards } = dealHand(seed.seed, cs, nonce);
+  // Draw replacements
+  const finalCards = drawCards(seed.seed, cs, nonce, initialCards, holds);
+
+  const hand = evaluateHand(finalCards);
+  const won = hand.payout > 0;
+
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+
+  const betResult = settleBet(
+    agentId, betId, amount, won, hand.payout,
+    "video_poker",
+    {
+      initial_cards: initialCards.map(c => `${c.rank}${c.suit}`),
+      final_cards: finalCards.map(c => `${c.rank}${c.suit}`),
+      holds,
+      hand_name: hand.name,
+      payout_multiplier: hand.payout,
+      payout_table: {
+        "Royal Flush": "800x", "Straight Flush": "50x", "Four of a Kind": "25x",
+        "Full House": "9x", "Flush": "6x", "Straight": "4x",
+        "Three of a Kind": "3x", "Two Pair": "2x", "Jacks or Better": "1x",
+      },
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  ) as VideoPokerDrawResult;
+
+  betResult.poker_hand = hand.name;
+  betResult.initial_cards = initialCards.map(c => ({ rank: c.rank, suit: c.suit }));
+  betResult.final_cards = finalCards.map(c => ({ rank: c.rank, suit: c.suit }));
+  betResult.holds = holds;
+
+  return betResult;
+}
+
 // ─── Batch Betting ───
 
 interface BatchBetInput {
