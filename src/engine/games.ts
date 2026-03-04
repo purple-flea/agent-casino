@@ -1361,6 +1361,8 @@ export function playBatch(agentId: string, bets: BatchBetInput[]): (BetResult | 
         return playKeno(agentId, bet.picks || [1, 2, 3], bet.amount, bet.client_seed);
       case "scratch_card":
         return playScratchCard(agentId, bet.amount, bet.client_seed);
+      case "wheel":
+        return playWheel(agentId, bet.amount, bet.client_seed);
       default:
         return { error: "unknown_game", message: `Unknown game: ${bet.game}` };
     }
@@ -1382,6 +1384,64 @@ function getWinProbForGame(game: string, result: Record<string, unknown>): numbe
     case "slots": return 0.35;
     default: return 0.5;
   }
+}
+
+// ─── Wheel of Fortune ───
+
+const WHEEL_SECTORS = [
+  { label: "💥 BUST",  multiplier: 0,    probability: 0.35, emoji: "💥" },
+  { label: "0.5x",     multiplier: 0.5,  probability: 0.25, emoji: "🌙" },
+  { label: "1x",       multiplier: 1,    probability: 0.15, emoji: "⭐" },
+  { label: "1.5x",     multiplier: 1.5,  probability: 0.10, emoji: "✨" },
+  { label: "2x",       multiplier: 2,    probability: 0.08, emoji: "💎" },
+  { label: "3x",       multiplier: 3,    probability: 0.04, emoji: "🔥" },
+  { label: "5x",       multiplier: 5,    probability: 0.02, emoji: "🌟" },
+  { label: "10x 🎉",  multiplier: 10,   probability: 0.01, emoji: "🎰" },
+] as const;
+// House edge: EV = 0.35*0+0.25*0.5+0.15*1+0.10*1.5+0.08*2+0.04*3+0.02*5+0.01*10 = 0.905 → 9.5%
+
+export function playWheel(
+  agentId: string,
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  const approxWinProb = 0.65; // win something (including break-even 1x)
+  const approxPayout = 1.5;   // average payout for Kelly reserve
+
+  const validation = validateAndReserve(agentId, amount, approxWinProb, approxPayout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const rawResult = calculateResult(seed.seed, cs, nonce);
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+
+  // Weighted sector selection
+  let cumulative = 0;
+  let sector: typeof WHEEL_SECTORS[number] = WHEEL_SECTORS[0];
+  for (const s of WHEEL_SECTORS) {
+    cumulative += s.probability;
+    if (rawResult < cumulative) { sector = s; break; }
+  }
+
+  const won = sector.multiplier > 0;
+
+  return settleBet(
+    agentId, betId, amount, won, sector.multiplier,
+    "wheel",
+    {
+      sector: sector.label,
+      multiplier: sector.multiplier,
+      won,
+      house_edge_pct: 9.5,
+      wheel: WHEEL_SECTORS.map(s => ({ label: s.label, multiplier: s.multiplier, probability: `${(s.probability * 100).toFixed(0)}%` })),
+      note: "Spin the wheel! 8 sectors from 💥 BUST to 10x jackpot.",
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  );
 }
 
 function round2(n: number): number {

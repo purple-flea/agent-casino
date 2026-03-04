@@ -231,6 +231,69 @@ const PURPLEFLEA_NETWORK = {
 app.get("/.well-known/purpleflea.json", (c) => c.json(PURPLEFLEA_NETWORK));
 app.get("/network", (c) => c.json(PURPLEFLEA_NETWORK));
 
+// ─── Network-wide live stats (public, 60s cache) ───
+app.get("/network/stats", async (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const fetchStat = async (url: string) => {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
+      return r.ok ? r.json() : null;
+    } catch { return null; }
+  };
+
+  const [casinoH, tradingH, walletH, domainsH] = await Promise.all([
+    fetchStat("http://localhost:3000/health"),
+    fetchStat("http://localhost:3003/health"),
+    fetchStat("http://localhost:3005/health"),
+    fetchStat("http://localhost:3004/health"),
+  ]);
+
+  const [casinoS, tradingS, walletS, domainsS] = await Promise.all([
+    fetchStat("http://localhost:3000/public-stats"),
+    fetchStat("http://localhost:3003/v1/public-stats"),
+    fetchStat("http://localhost:3005/v1/public-stats"),
+    fetchStat("http://localhost:3004/v1/public-stats"),
+  ]);
+
+  const totalAgents = [casinoH, tradingH, walletH, domainsH].reduce((sum, h) =>
+    sum + ((h as any)?.registered_agents ?? 0), 0);
+
+  return c.json({
+    network: "Purple Flea",
+    generated_at: new Date().toISOString(),
+    total_agents_across_all_services: totalAgents,
+    services: {
+      casino: {
+        status: (casinoH as any)?.status === "ok" ? "online" : "offline",
+        agents: (casinoH as any)?.registered_agents ?? 0,
+        total_bets: (casinoS as any)?.total_bets ?? null,
+        total_wagered_usd: (casinoS as any)?.total_wagered_usd ?? null,
+        url: "https://casino.purpleflea.com",
+      },
+      trading: {
+        status: (tradingH as any)?.status === "ok" ? "online" : "offline",
+        agents: (tradingH as any)?.registered_agents ?? 0,
+        total_trades: (tradingS as any)?.total_trades ?? null,
+        url: "https://trading.purpleflea.com",
+      },
+      wallet: {
+        status: (walletH as any)?.status === "ok" ? "online" : "offline",
+        agents: (walletH as any)?.registered_agents ?? 0,
+        url: "https://wallet.purpleflea.com",
+      },
+      domains: {
+        status: (domainsH as any)?.status === "ok" ? "online" : "offline",
+        agents: (domainsH as any)?.registered_agents ?? 0,
+        total_domains: (domainsS as any)?.total_domains ?? null,
+        url: "https://domains.purpleflea.com",
+      },
+    },
+    tip: "Embed your referral code across all services for compounding passive income.",
+    docs: "https://purpleflea.com/docs",
+  });
+});
+
 // ─── Ping (ultra-lightweight uptime check) ───
 app.get("/ping", (c) => {
   c.header("Cache-Control", "no-cache");
@@ -352,6 +415,7 @@ api.get("/bankroll-ruin", (c) => {
     keno:         { winProb: 0.25,    payout: 3.5,  houseEdge: 12.5 },
     scratch_card: { winProb: 0.33,    payout: 2.7,  houseEdge: 10.8 },
     hilo:         { winProb: 0.481,   payout: 2.0,  houseEdge: 3.8 },
+    wheel:        { winProb: 0.65,    payout: 1.43, houseEdge: 9.5 },
   };
 
   const gp = gameParams[game];
@@ -913,6 +977,11 @@ api.get("/feed", (c) => {
     crash: "played crash",
     plinko: "dropped plinko",
     slots: "spun slots",
+    keno: "played keno",
+    scratch_card: "scratched a card",
+    hilo: "played hi-lo",
+    video_poker: "played video poker",
+    wheel: "spun the wheel",
   };
 
   const feed = recentBets.map((b) => {

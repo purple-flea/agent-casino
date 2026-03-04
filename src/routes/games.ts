@@ -16,6 +16,7 @@ import {
   playVideoPokerDeal,
   playVideoPokerDraw,
   playBatch,
+  playWheel,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
 import { checkRateLimit } from "../middleware/rateLimit.js";
@@ -159,6 +160,16 @@ games.get("/", (c) => {
           "5 spots: 3=3x, 4=25x, 5=1000x": "",
           "10 spots: 5=10x, 7=500x, 10=250000x": "",
         },
+      },
+      {
+        id: "wheel",
+        name: "Wheel of Fortune",
+        description: "Spin the wheel! 8 sectors ranging from 💥 BUST to 🎉 10x jackpot. Pure luck, provably fair.",
+        house_edge: "~9.5%",
+        payout: "0x (BUST) / 0.5x / 1x / 1.5x / 2x / 3x / 5x / 10x",
+        endpoint: "POST /api/v1/games/wheel",
+        params: { amount: "number", client_seed: "string (optional)" },
+        sectors: { bust_0x: "35%", half_0_5x: "25%", even_1x: "15%", one_5x: "10%", double_2x: "8%", triple_3x: "4%", fiver_5x: "2%", jackpot_10x: "1%" },
       },
       {
         id: "scratch_card",
@@ -390,6 +401,21 @@ games.post("/keno", async (c) => {
   }
 
   const result = playKeno(agentId, picks, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Wheel of Fortune ───
+
+games.post("/wheel", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { amount, client_seed } = await c.req.json().catch(() => ({}));
+
+  const result = playWheel(agentId, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });

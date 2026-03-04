@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { randomUUID } from "crypto";
 import { db, schema } from "../db/index.js";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, sql, and, lt } from "drizzle-orm";
 import { authMiddleware } from "../middleware/auth.js";
 import { ledger } from "../wallet/ledger.js";
 import type { AppEnv } from "../types.js";
@@ -125,6 +125,122 @@ daily.post("/claim", authMiddleware, async (c) => {
     next_bonus_usd: getBonusAmount(streakDay + 1),
     tip: `Come back tomorrow to continue your streak! Day ${streakDay + 1} = $${getBonusAmount(streakDay + 1).toFixed(2)}`,
     play: "GET /api/v1/games to use your bonus",
+  });
+});
+
+// ─── Loss Recovery Bonus ───
+// If agent lost >= $5 in last 24h, they can claim back 10% (max $20) once per 24h
+
+const RECOVERY_THRESHOLD_USD = 5;   // min loss to qualify
+const RECOVERY_RATE = 0.10;          // 10% back
+const RECOVERY_MAX_USD = 20;         // cap per claim
+const RECOVERY_COOLDOWN_S = 86400;   // 24h between claims
+
+daily.get("/recovery", authMiddleware, async (c) => {
+  const agentId = c.get("agentId") as string;
+  const now = Math.floor(Date.now() / 1000);
+  const since = now - RECOVERY_COOLDOWN_S;
+
+  // Check if already claimed in last 24h
+  const lastClaim = db.select({ createdAt: schema.ledgerEntries.createdAt, amount: schema.ledgerEntries.amount })
+    .from(schema.ledgerEntries)
+    .where(and(
+      eq(schema.ledgerEntries.agentId, agentId),
+      eq(schema.ledgerEntries.reason, "loss_recovery_bonus"),
+      sql`${schema.ledgerEntries.createdAt} > ${since}`,
+    ))
+    .orderBy(desc(schema.ledgerEntries.createdAt))
+    .limit(1)
+    .get();
+
+  // Calculate net loss in last 24h from bets
+  const lossRow = db.select({
+    total_bet: sql<number>`coalesce(sum(${schema.bets.amount}), 0)`,
+    total_won: sql<number>`coalesce(sum(${schema.bets.amountWon}), 0)`,
+  }).from(schema.bets)
+    .where(and(
+      eq(schema.bets.agentId, agentId),
+      sql`${schema.bets.createdAt} > ${since}`,
+    ))
+    .get();
+
+  const netLoss = Math.max(0, (lossRow?.total_bet ?? 0) - (lossRow?.total_won ?? 0));
+  const eligible = netLoss >= RECOVERY_THRESHOLD_USD && !lastClaim;
+  const recoveryAmount = Math.min(netLoss * RECOVERY_RATE, RECOVERY_MAX_USD);
+  const nextClaimAt = lastClaim ? lastClaim.createdAt + RECOVERY_COOLDOWN_S : null;
+
+  return c.json({
+    eligible,
+    net_loss_24h_usd: Math.round(netLoss * 100) / 100,
+    recovery_amount_usd: eligible ? Math.round(recoveryAmount * 100) / 100 : 0,
+    already_claimed: !!lastClaim,
+    last_claim_at: lastClaim?.createdAt ?? null,
+    next_eligible_at: nextClaimAt,
+    threshold_usd: RECOVERY_THRESHOLD_USD,
+    recovery_rate: `${(RECOVERY_RATE * 100).toFixed(0)}%`,
+    max_recovery_usd: RECOVERY_MAX_USD,
+    claim: eligible ? "POST /api/v1/daily/recovery/claim" : null,
+    tip: eligible
+      ? `You lost $${netLoss.toFixed(2)} — claim $${recoveryAmount.toFixed(2)} recovery bonus now!`
+      : netLoss < RECOVERY_THRESHOLD_USD
+        ? `Need $${RECOVERY_THRESHOLD_USD}+ net losses in 24h to qualify (current: $${netLoss.toFixed(2)})`
+        : `Already claimed today. Next eligible: ${new Date(nextClaimAt! * 1000).toISOString()}`,
+  });
+});
+
+daily.post("/recovery/claim", authMiddleware, async (c) => {
+  const agentId = c.get("agentId") as string;
+  const now = Math.floor(Date.now() / 1000);
+  const since = now - RECOVERY_COOLDOWN_S;
+
+  // Check cooldown
+  const lastClaim = db.select({ createdAt: schema.ledgerEntries.createdAt })
+    .from(schema.ledgerEntries)
+    .where(and(
+      eq(schema.ledgerEntries.agentId, agentId),
+      eq(schema.ledgerEntries.reason, "loss_recovery_bonus"),
+      sql`${schema.ledgerEntries.createdAt} > ${since}`,
+    ))
+    .limit(1)
+    .get();
+
+  if (lastClaim) {
+    const nextAt = lastClaim.createdAt + RECOVERY_COOLDOWN_S;
+    return c.json({ error: "already_claimed", message: "Recovery bonus already claimed in last 24h", next_eligible_at: nextAt }, 429);
+  }
+
+  // Calculate losses
+  const lossRow = db.select({
+    total_bet: sql<number>`coalesce(sum(${schema.bets.amount}), 0)`,
+    total_won: sql<number>`coalesce(sum(${schema.bets.amountWon}), 0)`,
+  }).from(schema.bets)
+    .where(and(
+      eq(schema.bets.agentId, agentId),
+      sql`${schema.bets.createdAt} > ${since}`,
+    ))
+    .get();
+
+  const netLoss = Math.max(0, (lossRow?.total_bet ?? 0) - (lossRow?.total_won ?? 0));
+  if (netLoss < RECOVERY_THRESHOLD_USD) {
+    return c.json({
+      error: "not_eligible",
+      message: `Need $${RECOVERY_THRESHOLD_USD}+ net losses in last 24h. Current: $${netLoss.toFixed(2)}`,
+      net_loss_24h_usd: Math.round(netLoss * 100) / 100,
+    }, 400);
+  }
+
+  const recoveryAmount = Math.min(netLoss * RECOVERY_RATE, RECOVERY_MAX_USD);
+  ledger.credit(agentId, recoveryAmount, "loss_recovery_bonus", "casino");
+  const newBalance = ledger.getBalance(agentId);
+
+  return c.json({
+    claimed: true,
+    recovery_usd: Math.round(recoveryAmount * 100) / 100,
+    net_loss_covered_usd: Math.round(netLoss * 100) / 100,
+    balance_after: newBalance,
+    message: `Recovery bonus: +$${recoveryAmount.toFixed(2)} (10% of $${netLoss.toFixed(2)} losses)`,
+    tip: "Losses happen. We've got your back. Come back and play again!",
+    next_eligible_in_hours: 24,
   });
 });
 
