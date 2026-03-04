@@ -329,6 +329,80 @@ api.get("/public-stats", (c) => {
 // ─── /stats alias (no auth) — for economy dashboard ───
 api.get("/stats", (c) => c.redirect("/api/v1/public-stats", 301));
 
+// ─── Bankroll ruin probability calculator (public, no auth, 60s cache) ───
+api.get("/bankroll-ruin", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const game = c.req.query("game") ?? "coin_flip";
+  const balance = parseFloat(c.req.query("balance") ?? "100");
+  const betSize = parseFloat(c.req.query("bet_size") ?? "10");
+  const target = parseFloat(c.req.query("target") ?? String(balance * 2));
+
+  if (isNaN(balance) || balance <= 0 || isNaN(betSize) || betSize <= 0) {
+    return c.json({ error: "invalid_params", message: "balance and bet_size must be positive numbers" }, 400);
+  }
+
+  const gameParams: Record<string, { winProb: number; payout: number; houseEdge: number }> = {
+    coin_flip:    { winProb: 0.5,     payout: 1.99, houseEdge: 0.5 },
+    simple_dice:  { winProb: 1 / 6,   payout: 5.5,  houseEdge: 8.3 },
+    roulette:     { winProb: 18 / 38, payout: 2.0,  houseEdge: 5.26 },
+    blackjack:    { winProb: 0.425,   payout: 2.1,  houseEdge: 0.5 },
+    multiplier:   { winProb: 0.5,     payout: 1.96, houseEdge: 2.0 },
+    slots:        { winProb: 0.35,    payout: 2.85, houseEdge: 3.0 },
+    plinko:       { winProb: 0.35,    payout: 2.8,  houseEdge: 4.0 },
+    keno:         { winProb: 0.25,    payout: 3.5,  houseEdge: 12.5 },
+    scratch_card: { winProb: 0.33,    payout: 2.7,  houseEdge: 10.8 },
+    hilo:         { winProb: 0.481,   payout: 2.0,  houseEdge: 3.8 },
+  };
+
+  const gp = gameParams[game];
+  if (!gp) return c.json({ error: "unknown_game", valid_games: Object.keys(gameParams) }, 400);
+
+  const { winProb: p, payout, houseEdge } = gp;
+  const q = 1 - p;
+  const units = Math.max(1, Math.round(balance / betSize));
+  const targetUnits = Math.max(units + 1, Math.round(target / betSize));
+
+  let ruinProb: number;
+  if (Math.abs(p - q) < 0.001) {
+    ruinProb = 1 - units / targetUnits;
+  } else {
+    const ratio = q / p;
+    ruinProb = (Math.pow(ratio, units) - Math.pow(ratio, targetUnits)) / (1 - Math.pow(ratio, targetUnits));
+  }
+  ruinProb = Math.max(0, Math.min(1, ruinProb));
+
+  const kellyFraction = Math.max(0, (p * (payout - 1) - q) / (payout - 1));
+  const kellyBet = Math.round(balance * kellyFraction * 100) / 100;
+
+  return c.json({
+    game,
+    params: { starting_balance: balance, bet_size: betSize, target_balance: target },
+    house: { win_probability_pct: Math.round(p * 10000) / 100, payout_multiplier: payout, house_edge_pct: houseEdge },
+    ruin_analysis: {
+      probability_of_ruin_pct: Math.round(ruinProb * 10000) / 100,
+      probability_of_reaching_target_pct: Math.round((1 - ruinProb) * 10000) / 100,
+      verdict: ruinProb > 0.8 ? "DANGEROUS: bet size far too large" :
+               ruinProb > 0.5 ? "HIGH RISK: consider halving bet size" :
+               ruinProb > 0.25 ? "MODERATE: within range but suboptimal" : "LOW RISK: good bankroll management",
+    },
+    kelly_recommendation: {
+      optimal_kelly_fraction_pct: Math.round(kellyFraction * 10000) / 100,
+      optimal_bet_size_usd: kellyBet,
+      your_bet_is_pct_of_kelly: kellyFraction > 0 ? Math.round((betSize / balance / kellyFraction) * 100) : null,
+      advice: kellyBet > 0 && betSize > kellyBet
+        ? `Reduce bet from $${betSize} to $${kellyBet} for optimal long-term growth`
+        : `Bet size is within Kelly guidelines`,
+    },
+    survival_at_bets: [10, 25, 50, 100, 200].map((n) => ({
+      after_n_bets: n,
+      expected_balance_usd: Math.round((balance - n * betSize * houseEdge / 100) * 100) / 100,
+      rough_survival_pct: Math.round(Math.pow(1 - houseEdge / 100, n) * 10000) / 100,
+    })),
+    tip: "Kelly Criterion: bet only what maximizes long-term geometric growth. GET /api/v1/kelly/limits (auth) for personalized limits.",
+    updated_at: new Date().toISOString(),
+  });
+});
+
 // ─── Per-game analytics (no auth) — useful for agents choosing games ───
 api.get("/game-stats", (c) => {
   c.header("Cache-Control", "public, max-age=300");
@@ -1595,6 +1669,76 @@ api.get("/docs", (c) => c.json({
 }));
 
 app.route("/api/v1", api);
+
+// ─── Root-level aliases (crawlable, public, no auth) ───
+
+app.get("/leaderboard", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  return c.redirect("/api/v1/leaderboard-full", 302);
+});
+
+app.get("/stats", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  return c.redirect("/api/v1/public-stats", 302);
+});
+
+// ─── /feed — public activity feed, last 20 anonymized bets ───
+app.get("/feed", (c) => {
+  c.header("Cache-Control", "public, max-age=30");
+
+  const recentBets = db
+    .select({
+      agentId: bets.agentId,
+      game: bets.game,
+      amount: bets.amount,
+      amountWon: bets.amountWon,
+      won: bets.won,
+      payoutMultiplier: bets.payoutMultiplier,
+      createdAt: bets.createdAt,
+    })
+    .from(bets)
+    .orderBy(desc(bets.createdAt))
+    .limit(20)
+    .all();
+
+  const totalBets = db.select({ count: sql<number>`count(*)` }).from(bets).get()?.count ?? 0;
+  const totalAgents = db.select({ count: sql<number>`count(*)` }).from(agents).get()?.count ?? 0;
+
+  const feed = recentBets.map((b) => {
+    const agent = b.agentId.slice(0, 6) + "...";
+    const verb = b.won ? "won" : "lost";
+    const amtLabel = b.won
+      ? `$${b.amountWon.toFixed(2)} USDC`
+      : `$${b.amount.toFixed(2)} USDC`;
+    const game = b.game.replace(/_/g, " ");
+    return {
+      event: `Agent ${agent} ${verb} ${amtLabel} at ${game}`,
+      agent,
+      game: b.game,
+      side: b.won ? "win" : "loss",
+      amount: b.amount,
+      amount_won: b.amountWon,
+      multiplier: b.payoutMultiplier,
+      at: new Date(b.createdAt * 1000).toISOString(),
+    };
+  });
+
+  return c.json({
+    service: "agent-casino",
+    feed,
+    total_bets_all_time: totalBets,
+    total_agents: totalAgents,
+    note: "Last 20 bets. Agent IDs anonymized to first 6 chars. Updates every 30s.",
+    register: "POST /api/v1/auth/register to start playing",
+    updated: new Date().toISOString(),
+    _info: {
+      service: "agent-casino",
+      docs: "https://casino.purpleflea.com/llms.txt",
+      referral: "GET /api/v1/gossip for passive income info",
+      version: "1.0.0",
+    },
+  });
+});
 
 // ─── OpenAPI spec ───
 app.get("/openapi.json", (c) => c.json({

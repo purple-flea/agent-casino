@@ -515,4 +515,106 @@ stats.post("/pay", async (c) => {
   });
 });
 
+// ─── Public agent profile card (no auth, 60s cache) ───
+// Returns anonymized public profile for any agent by ID prefix
+
+stats.get("/profile/:agent_id", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const rawId = c.req.param("agent_id");
+
+  // Find agent by prefix or exact ID
+  const agent = db.select({
+    id: schema.agents.id,
+    totalWagered: schema.agents.totalWagered,
+    totalWon: schema.agents.totalWon,
+    createdAt: schema.agents.createdAt,
+    lastActive: schema.agents.lastActive,
+    referralCode: schema.agents.referralCode,
+    tier: schema.agents.tier,
+  }).from(schema.agents)
+    .where(rawId.length >= 36
+      ? eq(schema.agents.id, rawId)
+      : sql`${schema.agents.id} LIKE ${rawId + "%"}`)
+    .get();
+
+  if (!agent) {
+    return c.json({ error: "not_found", message: `No agent found matching '${rawId}'` }, 404);
+  }
+
+  // Game breakdown
+  const gameStats = db.select({
+    game: schema.bets.game,
+    betCount: count(),
+    totalWagered: sql<number>`COALESCE(SUM(${schema.bets.amount}), 0)`,
+    totalWon: sql<number>`COALESCE(SUM(${schema.bets.amountWon}), 0)`,
+    wins: sql<number>`SUM(CASE WHEN ${schema.bets.won} = 1 THEN 1 ELSE 0 END)`,
+    biggestWin: sql<number>`COALESCE(MAX(${schema.bets.amountWon}), 0)`,
+  }).from(schema.bets)
+    .where(eq(schema.bets.agentId, agent.id))
+    .groupBy(schema.bets.game)
+    .all();
+
+  const totalBets = gameStats.reduce((s, g) => s + g.betCount, 0);
+  const totalWins = gameStats.reduce((s, g) => s + g.wins, 0);
+  const netProfit = agent.totalWon - agent.totalWagered;
+
+  // Best game by net profit
+  const bestGame = [...gameStats].sort((a, b) => (b.totalWon - b.totalWagered) - (a.totalWon - a.totalWagered))[0];
+
+  // Referral count
+  const refCount = db.select({ count: count() })
+    .from(schema.referrals)
+    .where(eq(schema.referrals.referrerId, agent.id))
+    .get()?.count ?? 0;
+
+  // Days active
+  const daysActive = agent.lastActive && agent.createdAt
+    ? Math.round((agent.lastActive - agent.createdAt) / 86400)
+    : 0;
+
+  // Rank by net profit
+  const allAgents = db.select({
+    id: schema.agents.id,
+    netProfit: sql<number>`${schema.agents.totalWon} - ${schema.agents.totalWagered}`,
+  }).from(schema.agents)
+    .where(sql`${schema.agents.totalWagered} > 0`)
+    .all();
+  allAgents.sort((a, b) => b.netProfit - a.netProfit);
+  const rank = allAgents.findIndex(a => a.id === agent.id) + 1;
+
+  return c.json({
+    agent_id: agent.id.slice(0, 8) + "...",
+    tier: agent.tier,
+    member_since: new Date(agent.createdAt * 1000).toISOString().slice(0, 10),
+    days_active: daysActive,
+    career: {
+      total_bets: totalBets,
+      win_rate_pct: totalBets > 0 ? Math.round((totalWins / totalBets) * 10000) / 100 : 0,
+      total_wagered_usd: Math.round(agent.totalWagered * 100) / 100,
+      net_profit_usd: Math.round(netProfit * 100) / 100,
+      profit_status: netProfit > 0 ? "profitable" : netProfit < 0 ? "in_the_red" : "break_even",
+      all_time_rank: rank > 0 ? `#${rank}` : "unranked",
+    },
+    best_game: bestGame ? {
+      game: bestGame.game,
+      bets: bestGame.betCount,
+      net_profit_usd: Math.round((bestGame.totalWon - bestGame.totalWagered) * 100) / 100,
+      biggest_win_usd: Math.round(bestGame.biggestWin * 100) / 100,
+      win_rate_pct: bestGame.betCount > 0 ? Math.round((bestGame.wins / bestGame.betCount) * 10000) / 100 : 0,
+    } : null,
+    games_played: gameStats.map(g => ({
+      game: g.game,
+      bets: g.betCount,
+      win_rate_pct: g.betCount > 0 ? Math.round((g.wins / g.betCount) * 10000) / 100 : 0,
+      net_pct: g.totalWagered > 0 ? Math.round(((g.totalWon - g.totalWagered) / g.totalWagered) * 10000) / 100 : 0,
+    })).sort((a, b) => b.bets - a.bets),
+    referral_network: {
+      referrals_recruited: refCount,
+      referral_code: agent.referralCode ?? "none",
+      tip: refCount === 0 ? "Share your referral code to earn passive income" : `${refCount} agents referred`,
+    },
+    updated_at: new Date().toISOString(),
+  });
+});
+
 export { stats };

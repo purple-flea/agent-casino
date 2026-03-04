@@ -174,4 +174,122 @@ kelly.post("/simulate", async (c) => {
   return c.json(result);
 });
 
+// ─── Ruin probability calculator ───
+// NOTE: This is also mounted publicly at /api/v1/bankroll-ruin in index.ts (no auth)
+
+kelly.get("/ruin", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const game = c.req.query("game") ?? "coin_flip";
+  const balance = parseFloat(c.req.query("balance") ?? "100");
+  const betSize = parseFloat(c.req.query("bet_size") ?? "10");
+  const target = parseFloat(c.req.query("target") ?? String(balance * 2));
+
+  if (isNaN(balance) || balance <= 0 || isNaN(betSize) || betSize <= 0) {
+    return c.json({ error: "invalid_params", message: "balance and bet_size must be positive numbers" }, 400);
+  }
+
+  // Game parameters
+  const gameParams: Record<string, { winProb: number; payout: number; houseEdge: number }> = {
+    coin_flip:    { winProb: 0.5,     payout: 1.99, houseEdge: 0.5 },
+    dice:         { winProb: 0.4925,  payout: 1.98, houseEdge: 0.75 },
+    simple_dice:  { winProb: 1/6,     payout: 5.5,  houseEdge: 8.3 },
+    roulette:     { winProb: 18/38,   payout: 2.0,  houseEdge: 5.26 },
+    blackjack:    { winProb: 0.425,   payout: 2.1,  houseEdge: 0.5 },
+    multiplier:   { winProb: 0.5,     payout: 1.96, houseEdge: 2.0 },
+    slots:        { winProb: 0.35,    payout: 2.85, houseEdge: 3.0 },
+    plinko:       { winProb: 0.35,    payout: 2.8,  houseEdge: 4.0 },
+    keno:         { winProb: 0.25,    payout: 3.5,  houseEdge: 12.5 },
+    scratch_card: { winProb: 0.33,    payout: 2.7,  houseEdge: 10.8 },
+  };
+
+  const gp = gameParams[game];
+  if (!gp) {
+    return c.json({
+      error: "unknown_game",
+      valid_games: Object.keys(gameParams),
+    }, 400);
+  }
+
+  const { winProb, payout, houseEdge } = gp;
+  const lossProb = 1 - winProb;
+  const p = winProb;
+  const q = lossProb;
+
+  // Gambler's ruin formula: P(ruin) = ((q/p)^(B/b) - (q/p)^(T/b)) / (1 - (q/p)^(T/b))
+  // Where B = balance, T = target, b = bet_size
+  const units = Math.round(balance / betSize);
+  const targetUnits = Math.round(target / betSize);
+
+  let ruinProb: number;
+  let winProb2: number;
+
+  if (Math.abs(p - q) < 0.0001) {
+    // Fair game (p ≈ q): P(ruin) = 1 - units/targetUnits
+    ruinProb = 1 - units / targetUnits;
+    winProb2 = units / targetUnits;
+  } else {
+    const ratio = q / p;
+    const ruinNum = Math.pow(ratio, units) - Math.pow(ratio, targetUnits);
+    const ruinDen = 1 - Math.pow(ratio, targetUnits);
+    ruinProb = ruinNum / ruinDen;
+    winProb2 = 1 - ruinProb;
+  }
+
+  // Expected bets before game ends (absorbing barrier)
+  const expBets = p > q
+    ? (units / (p - q)) * (1 - Math.pow(q / p, targetUnits - units)) / (1 - Math.pow(q / p, targetUnits))
+    : units * (targetUnits - units);  // approximation for near-fair
+
+  // Survival at milestones (using geometric decay for simplicity)
+  const survivalRate = Math.pow(1 - houseEdge / 100, betSize / balance);
+
+  const milestones = [10, 25, 50, 100, 250, 500, 1000].map((n) => ({
+    after_n_bets: n,
+    survival_probability_pct: Math.round(Math.pow(1 - houseEdge / 100, n) * 10000) / 100,
+    expected_balance: Math.round((balance - (n * betSize * houseEdge / 100)) * 100) / 100,
+  }));
+
+  // Kelly fraction for this game
+  const kellyFraction = (p * (payout - 1) - q) / (payout - 1);
+  const kellyBet = Math.max(0, Math.round(balance * kellyFraction * 100) / 100);
+
+  return c.json({
+    game,
+    params: {
+      starting_balance: balance,
+      bet_size: betSize,
+      target_balance: target,
+      units_to_ruin: units,
+      units_to_target: targetUnits,
+    },
+    house: {
+      win_probability: Math.round(p * 10000) / 100,
+      payout_multiplier: payout,
+      house_edge_pct: houseEdge,
+    },
+    ruin_analysis: {
+      probability_of_ruin_pct: Math.round(ruinProb * 10000) / 100,
+      probability_of_hitting_target_pct: Math.round(winProb2 * 10000) / 100,
+      expected_bets_until_end: Math.round(Math.abs(expBets)),
+      verdict: ruinProb > 0.8 ? "HIGH RISK: bet size is too large relative to bankroll" :
+               ruinProb > 0.5 ? "MODERATE RISK: consider reducing bet size" :
+               "ACCEPTABLE: within Kelly Criterion guidelines",
+    },
+    survival_milestones: milestones,
+    kelly_recommendation: {
+      optimal_kelly_fraction_pct: Math.round(kellyFraction * 10000) / 100,
+      optimal_bet_size: kellyBet,
+      current_bet_as_pct_kelly: kellyFraction > 0
+        ? Math.round((betSize / balance / kellyFraction) * 100)
+        : null,
+      note: kellyBet < betSize
+        ? `Your bet ($${betSize}) exceeds Kelly optimal ($${kellyBet}). Reduce for long-term survival.`
+        : `Your bet ($${betSize}) is within Kelly guidelines.`,
+    },
+    tip: "Use GET /api/v1/kelly/limits (auth) for personalized limits based on your balance.",
+    updated_at: new Date().toISOString(),
+  });
+});
+
 export { kelly };
