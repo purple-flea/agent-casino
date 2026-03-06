@@ -1833,6 +1833,39 @@ api.get("/jackpot", (c) => {
   });
 });
 
+// ─── Jackpot history (public, 60s cache — social proof) ───
+api.get("/jackpot-history", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+  const winners = db.select({
+    agentId: bets.agentId,
+    amountWon: bets.amountWon,
+    amount: bets.amount,
+    createdAt: bets.createdAt,
+  }).from(bets)
+    .where(sql`${bets.game} = 'slots' AND ${bets.payoutMultiplier} = 250 AND ${bets.won} = 1`)
+    .orderBy(desc(bets.createdAt))
+    .limit(10).all();
+
+  const totalPaid = winners.reduce((s, w) => s + w.amountWon, 0);
+
+  return c.json({
+    service: "agent-casino",
+    jackpot_history: winners.map((w, i) => ({
+      rank: i + 1,
+      winner: w.agentId.slice(0, 8) + "...",
+      bet_amount: Math.round(w.amount * 100) / 100,
+      jackpot_won: Math.round(w.amountWon * 100) / 100,
+      multiplier: "250x",
+      at: new Date(w.createdAt * 1000).toISOString(),
+    })),
+    total_jackpots_hit: winners.length,
+    total_paid_out: Math.round(totalPaid * 100) / 100,
+    how_to_win: "POST /api/v1/games/slots — spin triple 7s for 250x payout + progressive pool",
+    current_pool: "GET /api/v1/jackpot for live pool size",
+    updated: new Date().toISOString(),
+  });
+});
+
 // ─── Bet analytics for authenticated agent ───
 api.use("/analytics", authMiddleware);
 api.get("/analytics", (c) => {
@@ -2135,9 +2168,92 @@ api.get("/docs", (c) => c.json({
   },
 }));
 
+// ─── Hot Games (no auth) — trending games by bet activity in last 1 hour ───
+
+api.get("/hot-games", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const since = Math.floor(Date.now() / 1000) - 3600;
+
+  // Aggregate per-game stats for the last hour
+  const gameRows = db
+    .select({
+      game: bets.game,
+      betCount: sql<number>`COUNT(*)`,
+      totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+      totalWon: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+      wins: sql<number>`SUM(CASE WHEN ${bets.won} = 1 THEN 1 ELSE 0 END)`,
+      uniquePlayers: sql<number>`COUNT(DISTINCT ${bets.agentId})`,
+    })
+    .from(bets)
+    .where(gte(bets.createdAt, since))
+    .groupBy(bets.game)
+    .all();
+
+  // Sort by bet count descending for hot games
+  gameRows.sort((a, b) => b.betCount - a.betCount);
+
+  const hotGames = gameRows.map((r) => ({
+    game: r.game,
+    bets_last_hour: r.betCount,
+    player_count: r.uniquePlayers,
+    total_wagered_usd: Math.round(r.totalWagered * 100) / 100,
+    total_won_usd: Math.round(r.totalWon * 100) / 100,
+    win_rate_pct: r.betCount > 0 ? Math.round((r.wins / r.betCount) * 10000) / 100 : 0,
+    house_edge_realized_pct: r.totalWagered > 0
+      ? Math.round(((r.totalWagered - r.totalWon) / r.totalWagered) * 10000) / 100
+      : 0,
+  }));
+
+  // Cold games = least active (tail of sorted list, excluding zero-bet games not present)
+  const coldGames = [...hotGames].reverse().slice(0, 3).map((g) => ({
+    game: g.game,
+    bets_last_hour: g.bets_last_hour,
+    player_count: g.player_count,
+    note: "Low traffic — could be a good time to play with less competition",
+  }));
+
+  const recommended = hotGames[0]?.game ?? null;
+
+  // Quick house summary for last hour
+  const hourStats = db
+    .select({
+      totalBets: sql<number>`COUNT(*)`,
+      totalWagered: sql<number>`COALESCE(SUM(${bets.amount}), 0)`,
+      totalPaidOut: sql<number>`COALESCE(SUM(${bets.amountWon}), 0)`,
+      uniqueAgents: sql<number>`COUNT(DISTINCT ${bets.agentId})`,
+    })
+    .from(bets)
+    .where(gte(bets.createdAt, since))
+    .get();
+
+  const houseStats = {
+    bets_last_hour: hourStats?.totalBets ?? 0,
+    wagered_usd: Math.round((hourStats?.totalWagered ?? 0) * 100) / 100,
+    paid_out_usd: Math.round((hourStats?.totalPaidOut ?? 0) * 100) / 100,
+    house_profit_usd: Math.round(((hourStats?.totalWagered ?? 0) - (hourStats?.totalPaidOut ?? 0)) * 100) / 100,
+    active_agents: hourStats?.uniqueAgents ?? 0,
+  };
+
+  return c.json({
+    recommended,
+    hot_games: hotGames,
+    cold_games: coldGames,
+    house_stats: houseStats,
+    window: "last 1 hour",
+    games_with_activity: hotGames.length,
+    updated: new Date().toISOString(),
+    tip: hotGames.length === 0
+      ? "No bets in the last hour — be the first! POST /api/v1/auth/register"
+      : `${hotGames.length} game(s) active. Hottest: ${recommended}`,
+  });
+});
+
 app.route("/api/v1", api);
 
 // ─── Root-level aliases (crawlable, public, no auth) ───
+
+app.get("/hot-games", (c) => c.redirect("/api/v1/hot-games", 302));
 
 app.get("/leaderboard", (c) => {
   c.header("Cache-Control", "public, max-age=60");
