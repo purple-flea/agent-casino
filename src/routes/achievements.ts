@@ -310,4 +310,55 @@ achievements.get("/", authMiddleware, async (c) => {
   });
 });
 
+// ─── GET /achievements/catalogue — public, no auth, all available achievements ───
+
+const CATALOGUE_CACHE = { data: null as object | null, ts: 0 };
+
+achievements.get("/catalogue", (c) => {
+  const now = Date.now();
+  if (CATALOGUE_CACHE.data && now - CATALOGUE_CACHE.ts < 3_600_000) {
+    return c.json(CATALOGUE_CACHE.data);
+  }
+
+  const catalogue = [
+    // Bet count milestones
+    { id: "first_bet",   name: "First Chip",       emoji: "🎰", description: "Place your first bet", requirement: "1 bet" },
+    { id: "bet_10",      name: "Getting Warmed Up", emoji: "🔥", description: "Place 10 bets",        requirement: "10 bets" },
+    { id: "bet_100",     name: "Centurion",         emoji: "💯", description: "Place 100 bets",       requirement: "100 bets" },
+    { id: "bet_1000",    name: "High Roller",       emoji: "🎩", description: "Place 1,000 bets",     requirement: "1,000 bets" },
+    // Volume milestones
+    { id: "volume_10",   name: "Ten Dollar Club",   emoji: "💵", description: "Wager $10 total",      requirement: "Wager $10" },
+    { id: "volume_100",  name: "The Hundred",       emoji: "💴", description: "Wager $100 total",     requirement: "Wager $100" },
+    { id: "volume_1000", name: "Grand Master",      emoji: "💎", description: "Wager $1,000 total",   requirement: "Wager $1,000" },
+    // Big wins
+    { id: "big_win_5",   name: "Lucky Strike",      emoji: "⚡", description: "Win $5 on a single bet",   requirement: "Win $5 in one bet" },
+    { id: "big_win_25",  name: "Jackpot Hunter",    emoji: "🏆", description: "Win $25 on a single bet",  requirement: "Win $25 in one bet" },
+    { id: "big_win_100", name: "Legend",            emoji: "👑", description: "Win $100 on a single bet", requirement: "Win $100 in one bet" },
+    // Win streaks
+    { id: "streak_3",    name: "Hat Trick",         emoji: "🎯", description: "Win 3 bets in a row",      requirement: "3-bet win streak" },
+    { id: "streak_5",    name: "On Fire",           emoji: "🔥", description: "Win 5 bets in a row",      requirement: "5-bet win streak" },
+    { id: "streak_10",   name: "Unstoppable",       emoji: "🌪️", description: "Win 10 bets in a row",     requirement: "10-bet win streak" },
+    // Explorer
+    { id: "explorer_3",  name: "Game Explorer",     emoji: "🗺️", description: "Play 3 different games",   requirement: "3 unique game types" },
+    { id: "explorer_5",  name: "Variety Pack",      emoji: "🎲", description: "Play 5 different games",   requirement: "5 unique game types" },
+    { id: "explorer_all",name: "Completionist",     emoji: "🏅", description: "Play all available games", requirement: "All 17 game types" },
+    // Jackpot
+    { id: "slots_jackpot", name: "Triple 7s",       emoji: "7️⃣", description: "Hit the slots jackpot (250x on triple 7s)", requirement: "Triple 7 on slots" },
+    // Daily bonus
+    { id: "daily_7",     name: "Week Warrior",      emoji: "📅", description: "Claim 7 daily bonuses in a row",   requirement: "7-day streak" },
+    { id: "daily_30",    name: "Monthly Player",    emoji: "🗓️", description: "Claim 30 daily bonuses in a row",  requirement: "30-day streak" },
+  ];
+
+  const data = {
+    total: catalogue.length,
+    achievements: catalogue,
+    how_to_check: "GET /api/v1/achievements (auth required) — shows your unlock status + progress",
+    note: "Achievements are computed in real-time from your bet history. No separate tracking table.",
+  };
+
+  CATALOGUE_CACHE.data = data;
+  CATALOGUE_CACHE.ts = now;
+  return c.json(data);
+});
+
 export { achievements };

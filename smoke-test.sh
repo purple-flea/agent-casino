@@ -53,6 +53,7 @@ check GET /api/v1/records "all-time game records"
 check GET /api/v1/streaks "active win/loss streaks"
 check GET /api/v1/house-stats "house performance analytics"
 check GET /api/v1/referral/estimate "referral income estimator"
+check GET /api/v1/achievements/catalogue "achievements catalogue (public)"
 check GET /changelog "changelog"
 check GET /robots.txt "robots.txt"
 check GET /sitemap.xml "sitemap"
@@ -68,6 +69,7 @@ check GET /ping "ping"
 echo ""
 echo "--- Demo endpoint ---"
 check POST /api/v1/demo "demo coin_flip" '{"game":"coin_flip","amount":1,"choice":"heads"}'
+check POST /api/v1/demo "demo baccarat" '{"game":"baccarat","amount":1,"bet_on":"banker"}'
 
 echo ""
 echo "--- Auth endpoints return 401 without token ---"

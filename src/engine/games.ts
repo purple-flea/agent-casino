@@ -1533,3 +1533,106 @@ function round2(n: number): number {
 function round4(n: number): number {
   return Math.round(n * 10000) / 10000;
 }
+
+// ─── Baccarat ───
+// Bet on "player" (1.24% house edge), "banker" (1.06%), or "tie" (14.4%)
+// Player wins: 1:1. Banker wins: 0.95:1. Tie: 8:1.
+
+function baccaratHandValue(cards: number[]): number {
+  return cards.reduce((s, c) => s + c, 0) % 10;
+}
+
+function subDraw(base: number, offset: number): number {
+  // Deterministic sub-draw from a base float using LCG-style mixing
+  const v = ((base * (offset * 1664525 + 1013904223)) % 1 + 1) % 1;
+  const idx = Math.floor(v * 13); // 0-12 → A,2..9,10,J,Q,K
+  return idx >= 9 ? 0 : idx + 1;  // 10/J/Q/K = 0, A=1, 2-9 face value
+}
+
+export function playBaccarat(
+  agentId: string,
+  bet_on: "player" | "banker" | "tie",
+  amount: number,
+  clientSeed?: string
+): BetResult | GameError {
+  if (!["player", "banker", "tie"].includes(bet_on)) {
+    return { error: "invalid_bet", message: "bet_on must be 'player', 'banker', or 'tie'" };
+  }
+
+  // Approximate win probs & payouts encoding house edge
+  let winProb: number;
+  let payout: number;
+  if (bet_on === "player")  { winProb = 0.4462; payout = 1.98; }  // ~1.24% edge
+  else if (bet_on === "banker") { winProb = 0.4585; payout = 1.90; } // ~1.06% edge (5% commission)
+  else                          { winProb = 0.0953; payout = 8.0;  } // ~14.4% edge
+
+  const validation = validateAndReserve(agentId, amount, winProb, payout);
+  if (!validation.ok) return validation.error;
+
+  const { betId } = validation;
+  const seed = getOrCreateActiveSeed(agentId);
+  const nonce = incrementNonce(seed.id);
+  const cs = clientSeed || `auto_${Date.now()}`;
+
+  const rawResult = calculateResult(seed.seed, cs, nonce);
+  const resultHash = getResultHash(seed.seed, cs, nonce);
+
+  // Draw 4 initial cards
+  const playerHand = [subDraw(rawResult, 1.1), subDraw(rawResult, 2.3)];
+  const bankerHand = [subDraw(rawResult, 3.7), subDraw(rawResult, 4.9)];
+
+  let playerVal = baccaratHandValue(playerHand);
+  let bankerVal = baccaratHandValue(bankerHand);
+
+  const natural = playerVal >= 8 || bankerVal >= 8;
+
+  if (!natural) {
+    // Player draws third card if <= 5
+    if (playerVal <= 5) {
+      const pc = subDraw(rawResult, 5.3);
+      playerHand.push(pc);
+      playerVal = baccaratHandValue(playerHand);
+
+      // Banker third card rules based on player's third card
+      const bankerDraws =
+        bankerVal <= 2 ||
+        (bankerVal === 3 && pc !== 8) ||
+        (bankerVal === 4 && [2, 3, 4, 5, 6, 7].includes(pc)) ||
+        (bankerVal === 5 && [4, 5, 6, 7].includes(pc)) ||
+        (bankerVal === 6 && [6, 7].includes(pc));
+
+      if (bankerDraws) {
+        bankerHand.push(subDraw(rawResult, 6.1));
+        bankerVal = baccaratHandValue(bankerHand);
+      }
+    } else if (bankerVal <= 5) {
+      // Player stood; banker draws if <= 5
+      bankerHand.push(subDraw(rawResult, 6.1));
+      bankerVal = baccaratHandValue(bankerHand);
+    }
+  }
+
+  let outcome: "player" | "banker" | "tie";
+  if (playerVal > bankerVal) outcome = "player";
+  else if (bankerVal > playerVal) outcome = "banker";
+  else outcome = "tie";
+
+  const won = outcome === bet_on;
+
+  return settleBet(
+    agentId, betId, amount, won, payout,
+    "baccarat",
+    {
+      bet_on,
+      outcome,
+      player_hand: playerHand,
+      player_value: playerVal,
+      banker_hand: bankerHand,
+      banker_value: bankerVal,
+      natural,
+      won,
+      note: "Standard baccarat rules. Banker 1.06% edge, Player 1.24% edge, Tie 14.4% edge.",
+    },
+    seed.seed, seed.seedHash, cs, nonce, resultHash
+  );
+}

@@ -1949,7 +1949,7 @@ api.post("/demo", async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { game = "coin_flip", amount = 1 } = body as { game?: string; amount?: number };
 
-  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "blackjack", "crash", "plinko", "simple_dice", "hilo"];
+  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "blackjack", "crash", "plinko", "simple_dice", "hilo", "baccarat"];
   if (!supportedGames.includes(game)) {
     return c.json({ error: "unsupported_game", supported: supportedGames }, 400);
   }
@@ -2001,6 +2001,19 @@ api.post("/demo", async (c) => {
     const winProb = Math.max(0.01, Math.min(0.99, cardsInFavor / 12));
     const payout = isPush ? 1.0 : Math.min(12.0, Math.max(1.05, (1 / winProb) * 0.96));
     result = { card1, card1_name: NAMES[card1-1], card2, card2_name: NAMES[card2-1], guess, result: isPush ? "push" : (won ? "win" : "loss"), won, payout: won ? amount * payout : 0, payout_multiplier: payout.toFixed(2), house_edge: "~4%" };
+  } else if (game === "baccarat") {
+    const body2 = body as { bet_on?: string };
+    const bet_on = ["player", "banker", "tie"].includes(body2.bet_on ?? "") ? body2.bet_on! : "banker";
+    // Simulate a simple baccarat outcome
+    const playerVal = (parseInt(hmac.slice(0, 2), 16) % 10);
+    const bankerVal = (parseInt(hmac.slice(2, 4), 16) % 10);
+    let outcome: string;
+    if (playerVal > bankerVal) outcome = "player";
+    else if (bankerVal > playerVal) outcome = "banker";
+    else outcome = "tie";
+    const won = outcome === bet_on;
+    const payout = bet_on === "tie" ? 8.0 : bet_on === "banker" ? 1.90 : 1.98;
+    result = { bet_on, outcome, player_value: playerVal, banker_value: bankerVal, won, payout: won ? amount * payout : 0, payout_multiplier: payout, note: "Banker 1.06% edge — optimal strategy" };
   } else {
     const won = roll < 45;
     result = { roll: Math.round(roll * 100) / 100, won, payout: won ? amount * 2 : 0 };

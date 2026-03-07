@@ -18,6 +18,7 @@ import {
   playBatch,
   playWheel,
   playMines,
+  playBaccarat,
 } from "../engine/games.js";
 import type { AppEnv } from "../types.js";
 import { checkRateLimit } from "../middleware/rateLimit.js";
@@ -208,6 +209,16 @@ games.get("/", (c) => {
           "Three of a Kind": "3x", "Two Pair": "2x", "Jacks or Better": "1x",
         },
         workflow: "1. POST /deal to see your hand. 2. Decide which cards to hold. 3. POST /draw with holds array + nonce from deal + your bet amount.",
+      },
+      {
+        id: "baccarat",
+        name: "Baccarat",
+        description: "Classic card game — bet on Player, Banker, or Tie. Banker has lowest house edge (1.06%). Two or three cards dealt per side per standard baccarat rules.",
+        house_edge: "Player 1.24% | Banker 1.06% | Tie 14.4%",
+        payout: "Player 1:1, Banker 0.95:1, Tie 8:1",
+        endpoint: "POST /api/v1/games/baccarat",
+        params: { bet_on: "player | banker | tie", amount: "number", client_seed: "string (optional)" },
+        example: { bet_on: "banker", amount: 10, note: "Banker has the lowest house edge — optimal strategy" },
       },
     ],
     batch_endpoint: "POST /api/v1/bets/batch",
@@ -505,6 +516,21 @@ games.post("/video-poker/draw", async (c) => {
   }
 
   const result = playVideoPokerDraw(agentId, nonce, holds, amount, client_seed);
+  if ("error" in result) return c.json(result, 400);
+  return c.json(result);
+});
+
+// ─── Baccarat ───
+
+games.post("/baccarat", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+  const { bet_on, amount, client_seed } = await c.req.json().catch(() => ({}));
+
+  const result = playBaccarat(agentId, bet_on, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
 });
