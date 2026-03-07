@@ -20,6 +20,11 @@ import {
   playMines,
   playBaccarat,
 } from "../engine/games.js";
+import { randomUUID } from "crypto";
+import { sql as sqlFn, eq as eqFn } from "drizzle-orm";
+import { db, schema } from "../db/index.js";
+import { ledger } from "../wallet/ledger.js";
+import { getOrCreateActiveSeed, incrementNonce, calculateResult, getResultHash } from "../engine/fairness.js";
 import type { AppEnv } from "../types.js";
 import { checkRateLimit } from "../middleware/rateLimit.js";
 
@@ -533,6 +538,242 @@ games.post("/baccarat", async (c) => {
   const result = playBaccarat(agentId, bet_on, amount, client_seed);
   if ("error" in result) return c.json(result, 400);
   return c.json(result);
+});
+
+// ─── Parlay ───
+// Chain 2-5 independent game outcomes. All must win. Combined multiplier = product × 0.90.
+
+type ParlayGame = "coin_flip" | "dice" | "simple_dice" | "multiplier";
+
+interface ParlayBetSpec {
+  game: ParlayGame;
+  params?: Record<string, unknown>;
+}
+
+interface ParlayLeg {
+  game: ParlayGame;
+  params: Record<string, unknown>;
+  result: Record<string, unknown>;
+  won: boolean;
+  multiplier: number;
+}
+
+function resolveParlayLeg(
+  game: ParlayGame,
+  params: Record<string, unknown>,
+  rawResult: number
+): { result: Record<string, unknown>; won: boolean; multiplier: number } | { error: string; message: string } {
+  const r = rawResult; // 0–99.99 float
+
+  if (game === "coin_flip") {
+    const side = (params.side as string) ?? "heads";
+    if (!["heads", "tails"].includes(side)) {
+      return { error: "invalid_side", message: "coin_flip side must be 'heads' or 'tails'" };
+    }
+    const outcome: "heads" | "tails" = r < 50 ? "heads" : "tails";
+    const won = outcome === side;
+    return { result: { side_chosen: side, outcome, roll: Math.round(r * 100) / 100 }, won, multiplier: 1.99 };
+  }
+
+  if (game === "simple_dice") {
+    const guess = params.guess as number | undefined;
+    const pick = typeof guess === "number" ? guess : (params.pick as number | undefined) ?? 3;
+    if (!Number.isInteger(pick) || pick < 1 || pick > 6) {
+      return { error: "invalid_pick", message: "simple_dice pick/guess must be an integer 1–6" };
+    }
+    const rolled = (Math.floor(r) % 6) + 1;
+    const won = rolled === pick;
+    return { result: { pick, rolled, payout_if_win: "5.5x" }, won, multiplier: 5.5 };
+  }
+
+  if (game === "dice") {
+    const direction = (params.direction as string) ?? "over";
+    const threshold = (params.threshold as number) ?? 50;
+    if (!["over", "under"].includes(direction)) {
+      return { error: "invalid_direction", message: "dice direction must be 'over' or 'under'" };
+    }
+    if (typeof threshold !== "number" || threshold < 1 || threshold > 99) {
+      return { error: "invalid_threshold", message: "dice threshold must be 1–99" };
+    }
+    const winProb = direction === "over" ? (100 - threshold) / 100 : threshold / 100;
+    const payout = Math.round((1 / winProb) * 0.995 * 10000) / 10000;
+    const diceValue = Math.floor(r) + 1;
+    const won = direction === "over" ? diceValue > threshold : diceValue < threshold;
+    return {
+      result: { direction, threshold, dice_value: diceValue, roll: Math.round(r * 100) / 100 },
+      won,
+      multiplier: payout,
+    };
+  }
+
+  if (game === "multiplier") {
+    const target = (params.target_multiplier as number) ?? 2;
+    if (typeof target !== "number" || target < 1.01 || target > 1000) {
+      return { error: "invalid_multiplier", message: "multiplier target_multiplier must be 1.01–1000" };
+    }
+    const crashPoint = r >= 99.99 ? 10000 : Math.round((0.995 / (1 - r / 100)) * 100) / 100;
+    const won = crashPoint >= target;
+    return {
+      result: { target_multiplier: target, crash_point: crashPoint, roll: Math.round(r * 100) / 100 },
+      won,
+      multiplier: target,
+    };
+  }
+
+  return { error: "unknown_game", message: `Unknown parlay game: ${game}` };
+}
+
+games.post("/parlay", async (c) => {
+  const agentId = c.get("agentId") as string;
+  const rl = checkRateLimit(agentId, "games", 60);
+  if (!rl.allowed) {
+    return c.json({ error: "rate_limit_exceeded", message: "Max 60 game requests/min", reset_at: new Date(rl.resetAt).toISOString() }, 429);
+  }
+
+  const body = await c.req.json().catch(() => ({})) as { amount?: unknown; bets?: unknown };
+  const { amount, bets } = body;
+
+  // Validate amount
+  if (typeof amount !== "number" || !Number.isFinite(amount) || amount <= 0) {
+    return c.json({ error: "invalid_amount", message: "amount must be a positive number" }, 400);
+  }
+  if (amount < 0.01) {
+    return c.json({ error: "invalid_amount", message: "Minimum parlay bet is $0.01" }, 400);
+  }
+  if (amount > 10) {
+    return c.json({ error: "invalid_amount", message: "Maximum parlay bet is $10.00 USDC" }, 400);
+  }
+
+  // Validate bets array
+  if (!Array.isArray(bets) || bets.length < 2 || bets.length > 5) {
+    return c.json({ error: "invalid_bets", message: "bets must be an array of 2–5 sub-bets" }, 400);
+  }
+
+  const validGames: ParlayGame[] = ["coin_flip", "dice", "simple_dice", "multiplier"];
+  for (const bet of bets) {
+    if (!bet || typeof bet !== "object" || !validGames.includes((bet as { game?: unknown }).game as ParlayGame)) {
+      return c.json({ error: "invalid_bets", message: `Each bet must have a game field: one of ${validGames.join(", ")}` }, 400);
+    }
+  }
+
+  // Check balance
+  const balance = ledger.getBalance(agentId);
+  if (balance < amount) {
+    return c.json({
+      error: "insufficient_balance",
+      message: `Balance $${balance.toFixed(2)} is less than bet $${amount.toFixed(2)}`,
+      suggestion: `Deposit at least $${(amount - balance).toFixed(2)} or reduce bet size`,
+    }, 400);
+  }
+
+  // Generate parlay ID and debit the bet amount upfront
+  const parlayId = `par_${randomUUID()}`;
+  const debited = ledger.debit(agentId, amount, "parlay_bet", "casino", parlayId);
+  if (!debited) {
+    return c.json({ error: "insufficient_balance", message: "Could not reserve funds" }, 400);
+  }
+
+  // Get the agent's seed once (shared for all legs, different nonces)
+  const seedPair = getOrCreateActiveSeed(agentId);
+
+  // Execute each leg sequentially
+  const legs: ParlayLeg[] = [];
+  let allWon = true;
+
+  for (const betSpec of bets as ParlayBetSpec[]) {
+    const game = betSpec.game;
+    const params = betSpec.params ?? {};
+    const cs = (params.client_seed as string) ?? `parlay_${Date.now()}`;
+
+    const nonce = incrementNonce(seedPair.id);
+    const rawResult = calculateResult(seedPair.seed, cs, nonce);
+
+    const legOutcome = resolveParlayLeg(game, params, rawResult);
+    if ("error" in legOutcome) {
+      // Refund and return error
+      ledger.credit(agentId, amount, "parlay_refund", "casino", parlayId);
+      return c.json(legOutcome, 400);
+    }
+
+    legs.push({
+      game,
+      params,
+      result: legOutcome.result,
+      won: legOutcome.won,
+      multiplier: legOutcome.multiplier,
+    });
+
+    if (!legOutcome.won) {
+      allWon = false;
+      // Continue executing remaining legs for the response (but already know we lost)
+    }
+  }
+
+  // Calculate combined multiplier (product of all individual multipliers × 0.90 parlay fee)
+  const legsWon = legs.filter((l) => l.won).length;
+  let combinedMultiplier = 0;
+  let payoutAmount = 0;
+
+  if (allWon) {
+    const product = legs.reduce((acc, l) => acc * l.multiplier, 1);
+    combinedMultiplier = Math.round(product * 0.9 * 100) / 100;
+    payoutAmount = Math.round(amount * combinedMultiplier * 100) / 100;
+    ledger.credit(agentId, payoutAmount, "parlay_win", "casino", parlayId);
+  }
+
+  // Update agent wagered/won stats
+  db.update(schema.agents)
+    .set({
+      totalWagered: sqlFn`${schema.agents.totalWagered} + ${amount}`,
+      totalWon: sqlFn`${schema.agents.totalWon} + ${payoutAmount}`,
+    })
+    .where(eqFn(schema.agents.id, agentId))
+    .run();
+
+  // Record ONE bet in the bets table
+  const placeholderNonce = 0;
+  const placeholderHash = getResultHash(seedPair.seed, `parlay_${parlayId}`, placeholderNonce);
+
+  db.insert(schema.bets).values({
+    id: parlayId,
+    agentId,
+    game: "parlay",
+    amount,
+    payoutMultiplier: allWon ? combinedMultiplier : 0,
+    result: JSON.stringify({ legs: legs.map((l) => ({ game: l.game, result: l.result, won: l.won, multiplier: l.multiplier })), all_won: allWon, legs_won: legsWon }),
+    won: allWon,
+    amountWon: payoutAmount,
+    serverSeed: seedPair.seed,
+    serverSeedHash: seedPair.seedHash,
+    clientSeed: `parlay_${parlayId}`,
+    nonce: placeholderNonce,
+    resultHash: placeholderHash,
+  }).run();
+
+  const balanceAfter = ledger.getBalance(agentId);
+
+  // Build response legs
+  const responseLegs = legs.map((l) => {
+    const base: Record<string, unknown> = {
+      game: l.game,
+      won: l.won,
+      multiplier: l.multiplier,
+    };
+    // Include key result fields at top level for readability
+    Object.assign(base, l.result);
+    return base;
+  });
+
+  return c.json({
+    parlay_id: parlayId,
+    total_bet: amount,
+    legs: responseLegs,
+    all_won: allWon,
+    legs_won: legsWon,
+    combined_multiplier: combinedMultiplier,
+    payout: payoutAmount,
+    balance_after: Math.round(balanceAfter * 100) / 100,
+  });
 });
 
 export { games };
