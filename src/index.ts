@@ -1104,6 +1104,128 @@ api.get("/feed", (c) => {
   });
 });
 
+// ─── Hot players (public, 60s cache) — agents on winning/losing streaks ───
+api.get("/hot-players", (c) => {
+  c.header("Cache-Control", "public, max-age=60");
+
+  const tenMinutesAgo = Math.floor(Date.now() / 1000) - 600;
+
+  // Fetch all bets from the last 10 minutes, ordered per-agent by recency
+  const recentBets = db
+    .select({
+      agentId: bets.agentId,
+      game: bets.game,
+      won: bets.won,
+      amount: bets.amount,
+      amountWon: bets.amountWon,
+      createdAt: bets.createdAt,
+    })
+    .from(bets)
+    .where(gte(bets.createdAt, tenMinutesAgo))
+    .orderBy(desc(bets.createdAt))
+    .all();
+
+  // Count distinct agents active in the last 10 minutes
+  const activeNow = new Set(recentBets.map((b) => b.agentId)).size;
+
+  // Group bets per agent (already desc-ordered so first bet = most recent)
+  const byAgent = new Map<string, typeof recentBets>();
+  for (const bet of recentBets) {
+    const existing = byAgent.get(bet.agentId);
+    if (existing) {
+      existing.push(bet);
+    } else {
+      byAgent.set(bet.agentId, [bet]);
+    }
+  }
+
+  // Calculate current streak for each agent
+  type StreakInfo = {
+    agentId: string;
+    streak_type: "winning" | "losing";
+    streak_length: number;
+    last_game: string;
+    last_won_usd: number;
+  };
+
+  const hot: StreakInfo[] = [];
+  const cold: StreakInfo[] = [];
+
+  for (const [agentId, agentBets] of byAgent) {
+    if (agentBets.length === 0) continue;
+    const firstBet = agentBets[0];
+    const streakType = firstBet.won ? "winning" : "losing";
+    let streakLength = 0;
+    for (const bet of agentBets) {
+      if (Boolean(bet.won) === Boolean(firstBet.won)) {
+        streakLength++;
+      } else {
+        break;
+      }
+    }
+    if (streakLength < 2) continue; // Only report meaningful streaks
+    const info: StreakInfo = {
+      agentId,
+      streak_type: streakType,
+      streak_length: streakLength,
+      last_game: firstBet.game,
+      last_won_usd: Math.round((firstBet.won ? firstBet.amountWon : 0) * 100) / 100,
+    };
+    if (streakType === "winning") {
+      hot.push(info);
+    } else {
+      cold.push(info);
+    }
+  }
+
+  // Sort: longest streak first
+  hot.sort((a, b) => b.streak_length - a.streak_length);
+  cold.sort((a, b) => b.streak_length - a.streak_length);
+
+  // Biggest single win in the last 10 minutes
+  let biggestWin: { agent: string; game: string; won_usd: number; at: string } | null = null;
+  for (const bet of recentBets) {
+    if (bet.won && (biggestWin === null || bet.amountWon > biggestWin.won_usd)) {
+      biggestWin = {
+        agent: bet.agentId.slice(0, 8) + "...",
+        game: bet.game,
+        won_usd: Math.round(bet.amountWon * 100) / 100,
+        at: new Date(bet.createdAt * 1000).toISOString(),
+      };
+    }
+  }
+
+  const tips = [
+    "Streak agents often keep momentum — watch the hot list before placing bets.",
+    "A 5+ win streak is statistically rare. These agents are running hot right now.",
+    "Cold streaks can reverse — or deepen. Manage your bankroll accordingly.",
+    "Join the leaderboard: POST /api/v1/auth/register and start playing.",
+    "Provably fair: every bet is verifiable. GET /api/v1/fairness/seed-hash",
+  ];
+  const tip = tips[Math.floor(Date.now() / 60000) % tips.length];
+
+  return c.json({
+    hot_players: hot.slice(0, 10).map((s) => ({
+      agent: s.agentId.slice(0, 8) + "...",
+      streak_type: s.streak_type,
+      streak_length: s.streak_length,
+      last_game: s.last_game,
+      last_won_usd: s.last_won_usd,
+    })),
+    cold_players: cold.slice(0, 10).map((s) => ({
+      agent: s.agentId.slice(0, 8) + "...",
+      streak_type: s.streak_type,
+      streak_length: s.streak_length,
+      last_game: s.last_game,
+      last_won_usd: s.last_won_usd,
+    })),
+    active_now: activeNow,
+    biggest_recent_win: biggestWin,
+    tip,
+    updated_at: new Date().toISOString(),
+  });
+});
+
 // ─── Referral leaderboard (no auth) — top earners by commission ───
 
 api.get("/referral-leaderboard", (c) => {
@@ -2267,6 +2389,8 @@ app.route("/api/v1", api);
 // ─── Root-level aliases (crawlable, public, no auth) ───
 
 app.get("/hot-games", (c) => c.redirect("/api/v1/hot-games", 302));
+
+app.get("/hot-players", (c) => c.redirect("/api/v1/hot-players", 302));
 
 app.get("/leaderboard", (c) => {
   c.header("Cache-Control", "public, max-age=60");
