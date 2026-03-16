@@ -124,37 +124,37 @@ CREATE INDEX IF NOT EXISTS idx_bets_game ON bets(game);
 CREATE INDEX IF NOT EXISTS idx_bets_created ON bets(created_at);
 `;
 
+import { randomBytes } from "crypto";
+
 export function runMigrations() {
   sqlite.exec(migrations);
-}
 
-// Add referral_code column if missing
-try {
-  sqlite.exec("ALTER TABLE agents ADD COLUMN referral_code TEXT");
-  console.log("[migrate] Added referral_code column");
-} catch (e: any) {
-  if (!e.message?.includes("duplicate column")) throw e;
-}
+  // Add referral_code column if missing
+  try {
+    sqlite.exec("ALTER TABLE agents ADD COLUMN referral_code TEXT");
+    console.log("[migrate] Added referral_code column");
+  } catch (e: any) {
+    if (!e.message?.includes("duplicate column")) throw e;
+  }
 
-// Add unique index on referral_code
-try {
-  sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_referral_code ON agents(referral_code) WHERE referral_code IS NOT NULL");
-  console.log("[migrate] Added referral_code unique index");
-} catch (e: any) {
-  // Index may already exist
-}
+  // Add unique index on referral_code
+  try {
+    sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_referral_code ON agents(referral_code) WHERE referral_code IS NOT NULL");
+    console.log("[migrate] Added referral_code unique index");
+  } catch (e: any) {
+    // Index may already exist
+  }
 
-// Backfill existing agents without referral codes
-import { randomBytes } from "crypto";
-const rows = sqlite.prepare("SELECT id FROM agents WHERE referral_code IS NULL").all() as any[];
-for (const row of rows) {
-  const code = `ref_${randomBytes(4).toString("hex")}`;
-  sqlite.prepare("UPDATE agents SET referral_code = ? WHERE id = ?").run(code, row.id);
-}
-if (rows.length > 0) console.log(`[migrate] Backfilled ${rows.length} referral codes`);
+  // Backfill existing agents without referral codes
+  const rows = sqlite.prepare("SELECT id FROM agents WHERE referral_code IS NULL").all() as any[];
+  for (const row of rows) {
+    const code = `ref_${randomBytes(4).toString("hex")}`;
+    sqlite.prepare("UPDATE agents SET referral_code = ? WHERE id = ?").run(code, row.id);
+  }
+  if (rows.length > 0) console.log(`[migrate] Backfilled ${rows.length} referral codes`);
 
-// Tournaments + Challenges
-sqlite.exec(`
+  // Tournaments + Challenges
+  sqlite.exec(`
 CREATE TABLE IF NOT EXISTS tournaments (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -196,8 +196,8 @@ CREATE INDEX IF NOT EXISTS idx_challenges_challenged ON challenges(challenged_id
 CREATE INDEX IF NOT EXISTS idx_challenges_status ON challenges(status);
 `);
 
-// Daily bonuses
-sqlite.exec(`
+  // Daily bonuses
+  sqlite.exec(`
 CREATE TABLE IF NOT EXISTS daily_bonuses (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -208,8 +208,8 @@ CREATE TABLE IF NOT EXISTS daily_bonuses (
 CREATE INDEX IF NOT EXISTS idx_daily_agent ON daily_bonuses(agent_id);
 `);
 
-// First deposit bonuses
-sqlite.exec(`
+  // First deposit bonuses
+  sqlite.exec(`
 CREATE TABLE IF NOT EXISTS deposit_bonuses (
   id TEXT PRIMARY KEY,
   agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -225,3 +225,4 @@ CREATE TABLE IF NOT EXISTS deposit_bonuses (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_deposit_bonuses_agent ON deposit_bonuses(agent_id);
 CREATE INDEX IF NOT EXISTS idx_deposit_bonuses_status ON deposit_bonuses(status);
 `);
+}
