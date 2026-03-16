@@ -49,6 +49,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "mcp": "tsx src/mcp/server.ts",
+    "postinstall": "npm rebuild",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
