@@ -27,7 +27,7 @@ fairness.get("/seed-hash", async (c) => {
 // ─── Verify a past bet ───
 
 fairness.post("/verify", async (c) => {
-  const { bet_id, server_seed, server_seed_hash, client_seed, nonce } = await c.req.json();
+  const { bet_id, server_seed, server_seed_hash, client_seed, nonce } = await c.req.json().catch(() => ({} as Record<string, undefined>));
 
   // If bet_id provided, look up from DB
   if (bet_id) {

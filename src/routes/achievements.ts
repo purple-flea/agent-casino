@@ -322,31 +322,34 @@ achievements.get("/catalogue", (c) => {
 
   const catalogue = [
     // Bet count milestones
-    { id: "first_bet",   name: "First Chip",       emoji: "🎰", description: "Place your first bet", requirement: "1 bet" },
-    { id: "bet_10",      name: "Getting Warmed Up", emoji: "🔥", description: "Place 10 bets",        requirement: "10 bets" },
-    { id: "bet_100",     name: "Centurion",         emoji: "💯", description: "Place 100 bets",       requirement: "100 bets" },
-    { id: "bet_1000",    name: "High Roller",       emoji: "🎩", description: "Place 1,000 bets",     requirement: "1,000 bets" },
+    { id: "first_bet",   name: "First Chip",       emoji: "🎰", category: "bets",    description: "Place your first bet",   requirement: "1 bet" },
+    { id: "bet_10",      name: "Getting Warmed Up", emoji: "🔥", category: "bets",    description: "Place 10 bets",          requirement: "10 bets" },
+    { id: "bet_100",     name: "Centurion",         emoji: "💯", category: "bets",    description: "Place 100 bets",         requirement: "100 bets" },
+    { id: "bet_1000",    name: "High Roller",       emoji: "🎩", category: "bets",    description: "Place 1,000 bets",       requirement: "1,000 bets" },
     // Volume milestones
-    { id: "volume_10",   name: "Ten Dollar Club",   emoji: "💵", description: "Wager $10 total",      requirement: "Wager $10" },
-    { id: "volume_100",  name: "The Hundred",       emoji: "💴", description: "Wager $100 total",     requirement: "Wager $100" },
-    { id: "volume_1000", name: "Grand Master",      emoji: "💎", description: "Wager $1,000 total",   requirement: "Wager $1,000" },
+    { id: "volume_10",   name: "Ten Dollar Club",   emoji: "💵", category: "volume",  description: "Wager $10 total",        requirement: "Wager $10" },
+    { id: "volume_100",  name: "The Hundred",       emoji: "💴", category: "volume",  description: "Wager $100 total",       requirement: "Wager $100" },
+    { id: "volume_1000", name: "Grand Master",      emoji: "💎", category: "volume",  description: "Wager $1,000 total",     requirement: "Wager $1,000" },
     // Big wins
-    { id: "big_win_5",   name: "Lucky Strike",      emoji: "⚡", description: "Win $5 on a single bet",   requirement: "Win $5 in one bet" },
-    { id: "big_win_25",  name: "Jackpot Hunter",    emoji: "🏆", description: "Win $25 on a single bet",  requirement: "Win $25 in one bet" },
-    { id: "big_win_100", name: "Legend",            emoji: "👑", description: "Win $100 on a single bet", requirement: "Win $100 in one bet" },
+    { id: "big_win_5",   name: "Payday",            emoji: "🤑", category: "wins",    description: "Win $5 in a single bet",   requirement: "Single win >= $5" },
+    { id: "big_win_50",  name: "Jackpot Junior",    emoji: "🏆", category: "wins",    description: "Win $50 in a single bet",  requirement: "Single win >= $50" },
+    { id: "big_win_500", name: "Whale Alert",       emoji: "🐋", category: "wins",    description: "Win $500 in a single bet", requirement: "Single win >= $500" },
     // Win streaks
-    { id: "streak_3",    name: "Hat Trick",         emoji: "🎯", description: "Win 3 bets in a row",      requirement: "3-bet win streak" },
-    { id: "streak_5",    name: "On Fire",           emoji: "🔥", description: "Win 5 bets in a row",      requirement: "5-bet win streak" },
-    { id: "streak_10",   name: "Unstoppable",       emoji: "🌪️", description: "Win 10 bets in a row",     requirement: "10-bet win streak" },
-    // Explorer
-    { id: "explorer_3",  name: "Game Explorer",     emoji: "🗺️", description: "Play 3 different games",   requirement: "3 unique game types" },
-    { id: "explorer_5",  name: "Variety Pack",      emoji: "🎲", description: "Play 5 different games",   requirement: "5 unique game types" },
-    { id: "explorer_all",name: "Completionist",     emoji: "🏅", description: "Play all available games", requirement: "All 17 game types" },
+    { id: "streak_5",    name: "On a Roll",         emoji: "🎯", category: "streaks", description: "Win 5 bets in a row",      requirement: "5-bet win streak" },
+    { id: "streak_10",   name: "Unstoppable",       emoji: "⚡", category: "streaks", description: "Win 10 bets in a row",     requirement: "10-bet win streak" },
+    // Game variety
+    { id: "game_explorer", name: "Game Explorer",   emoji: "🗺️", category: "variety", description: "Try 5 different games",    requirement: "5 unique game types" },
+    { id: "game_master", name: "Casino Master",     emoji: "👑", category: "variety", description: "Try all 9+ game types",    requirement: "9 unique game types" },
     // Jackpot
-    { id: "slots_jackpot", name: "Triple 7s",       emoji: "7️⃣", description: "Hit the slots jackpot (250x on triple 7s)", requirement: "Triple 7 on slots" },
+    { id: "slots_jackpot", name: "Triple Sevens",   emoji: "7️⃣", category: "special", description: "Hit the 250x jackpot on Slots", requirement: "Triple 7 on slots" },
     // Daily bonus
-    { id: "daily_7",     name: "Week Warrior",      emoji: "📅", description: "Claim 7 daily bonuses in a row",   requirement: "7-day streak" },
-    { id: "daily_30",    name: "Monthly Player",    emoji: "🗓️", description: "Claim 30 daily bonuses in a row",  requirement: "30-day streak" },
+    { id: "daily_first", name: "First Timer",       emoji: "📅", category: "daily",   description: "Claim your first daily bonus",     requirement: "1 daily claim" },
+    { id: "daily_7",     name: "Week Warrior",      emoji: "🌟", category: "daily",   description: "Claim 7 daily bonuses",            requirement: "7 daily claims" },
+    { id: "daily_30",    name: "Monthly Regular",   emoji: "🗓️", category: "daily",   description: "Claim 30 daily bonuses",           requirement: "30 daily claims" },
+    { id: "streak_7_daily", name: "Perfect Week",   emoji: "🏅", category: "daily",   description: "Reach a 7-day daily bonus streak", requirement: "7-day consecutive streak" },
+    // Bold bets
+    { id: "bold_bet",    name: "Bold Move",         emoji: "😤", category: "bets",    description: "Place a single bet over $5",       requirement: "Single bet >= $5" },
+    { id: "all_in",      name: "All In",            emoji: "💥", category: "bets",    description: "Place a single bet over $50",      requirement: "Single bet >= $50" },
   ];
 
   const data = {

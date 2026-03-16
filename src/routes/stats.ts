@@ -171,7 +171,7 @@ stats.get("/leaderboard", async (c) => {
 
   // Per-game top players if game filter is provided
   let gameLeaderboard = null;
-  const supportedGames = ["coin_flip", "dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko"];
+  const supportedGames = ["coin_flip", "dice", "simple_dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko", "slots", "hilo", "keno", "scratch_card", "video_poker", "wheel", "mines", "baccarat"];
 
   if (game && supportedGames.includes(game)) {
     const gameStats = db
