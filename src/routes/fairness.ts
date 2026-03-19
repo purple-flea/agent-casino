@@ -71,7 +71,7 @@ fairness.post("/verify", async (c) => {
       bet_id: bet.id,
       verified: verification.valid,
       game: bet.game,
-      result: JSON.parse(bet.result),
+      result: (() => { try { return JSON.parse(bet.result); } catch { return bet.result; } })(),
       won: bet.won,
       amount_bet: bet.amount,
       amount_won: bet.amountWon,
@@ -140,7 +140,7 @@ fairness.get("/audit/:betId", async (c) => {
     payout_multiplier: bet.payoutMultiplier,
     won: bet.won,
     amount_won: bet.amountWon,
-    result: JSON.parse(bet.result),
+    result: (() => { try { return JSON.parse(bet.result); } catch { return bet.result; } })(),
     fairness: {
       server_seed_hash: bet.serverSeedHash,
       server_seed: seedRecord?.revealedAt ? bet.serverSeed : "[hidden until seed rotation]",

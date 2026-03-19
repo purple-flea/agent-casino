@@ -83,7 +83,7 @@ betsRouter.get("/history", (c) => {
   let conditions = [eq(schema.bets.agentId, agentId)];
 
   if (game) {
-    const VALID_GAMES = ["coin_flip", "dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko", "slots"];
+    const VALID_GAMES = ["coin_flip", "dice", "simple_dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko", "slots", "hilo", "keno", "scratch_card", "video_poker", "wheel", "mines", "baccarat"];
     if (!VALID_GAMES.includes(game)) {
       return c.json({ error: "invalid_game", message: `game must be one of: ${VALID_GAMES.join(", ")}` }, 400);
     }
@@ -183,7 +183,7 @@ betsRouter.get("/export.csv", (c) => {
   let conditions = [eq(schema.bets.agentId, agentId)];
 
   if (game) {
-    const VALID_GAMES = ["coin_flip", "dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko", "slots"];
+    const VALID_GAMES = ["coin_flip", "dice", "simple_dice", "multiplier", "roulette", "custom", "blackjack", "crash", "plinko", "slots", "hilo", "keno", "scratch_card", "video_poker", "wheel", "mines", "baccarat"];
     if (VALID_GAMES.includes(game)) conditions.push(eq(schema.bets.game, game));
   }
   if (outcome === "won") conditions.push(eq(schema.bets.won, true));
